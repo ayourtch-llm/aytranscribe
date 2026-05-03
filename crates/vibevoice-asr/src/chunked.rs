@@ -12,6 +12,8 @@ pub const DEFAULT_CHUNK_OVERLAP_SECS: f64 = 30.0;
 pub trait TranscriptionProgress: Send + Sync {
     fn on_model_loaded(&self) {}
     fn on_chunk_start(&self, _chunk_index: usize, _total_chunks: usize, _start_time_secs: f64) {}
+    fn on_generation_progress(&self, _tokens_generated: usize, _estimated_total: usize) {}
+    fn on_token(&self, _text: &str) {}
     fn on_chunk_complete(&self, _chunk_index: usize, _partial_result: &str) {}
     fn on_complete(&self, _full_result: &str) {}
 }
@@ -117,7 +119,8 @@ impl VibeVoiceAsrModel {
                 Tensor::from_vec(chunk_samples.to_vec(), (1, 1, chunk_samples.len()), device)?;
             let inputs =
                 processor.prepare_audio_tensor(speech_tensor, chunk_samples.len(), options.context_info)?;
-            let chunk_json = self.transcribe_inputs(&inputs, options.max_new_tokens)?;
+            let chunk_json =
+                self.transcribe_inputs_with_progress(&inputs, options.max_new_tokens, progress)?;
             let chunk_segments =
                 parse_transcription_segments(&chunk_json, start_time_secs)?;
             let appended = merge_transcription_segments(&mut merged, chunk_segments);

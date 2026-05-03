@@ -13,6 +13,7 @@ use vibevoice_core::{DTypeName, Qwen2DecoderConfig, VibeVoiceASRConfig};
 use vibevoice_tokenizer::{VibeVoiceAcousticTokenizerModel, VibeVoiceSemanticTokenizerModel};
 
 use crate::{
+    chunked::TranscriptionProgress,
     error::{Result, VibeVoiceAsrError},
     processor::{VibeVoiceAsrInputs, VibeVoiceAsrProcessor},
     qwen2::{self, RmsNorm},
@@ -89,22 +90,10 @@ impl VibeVoiceAsrModel {
         let model_dir = model_dir.as_ref();
         let config = VibeVoiceASRConfig::from_path(model_dir.join("config.json"))?;
         let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(VibeVoiceAsrError::Tokenizer)?;
-        let dtype = config
-            .torch_dtype
-            .or(config.decoder_config.torch_dtype)
-            .unwrap_or(DTypeName::F32)
-            .into_candle();
-        let load_dtype = if device.is_cuda() {
-            match dtype {
-                DType::BF16 | DType::F16 => dtype,
-                _ => DType::BF16,
-            }
-        } else {
-            DType::F32
-        };
-
         let weight_files = find_weight_files(model_dir)?;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_files, load_dtype, &device)? };
+        // Use F32 everywhere — bf16 causes numerical drift in encoder
+        // convolutions and decoder autoregressive generation on long audio.
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_files, DType::F32, &device)? };
 
         let acoustic_tokenizer = VibeVoiceAcousticTokenizerModel::load_hf_encoder(
             &config.acoustic_tokenizer_config,
@@ -145,7 +134,7 @@ impl VibeVoiceAsrModel {
             decoder,
             decoder_tokenizer: tokenizer,
             device,
-            model_dtype: load_dtype,
+            model_dtype: DType::F32,
             eos_token_id,
         })
     }
@@ -205,11 +194,28 @@ impl VibeVoiceAsrModel {
         inputs: &VibeVoiceAsrInputs,
         max_new_tokens: usize,
     ) -> Result<String> {
+        self.transcribe_inputs_with_progress(inputs, max_new_tokens, None)
+    }
+
+    pub fn transcribe_inputs_with_progress(
+        &mut self,
+        inputs: &VibeVoiceAsrInputs,
+        max_new_tokens: usize,
+        progress: Option<&dyn TranscriptionProgress>,
+    ) -> Result<String> {
         if max_new_tokens == 0 {
             return Ok(String::new());
         }
         self.decoder.clear_kv_cache();
         let speech = self.encode_speech(&inputs.speech_tensor)?;
+        let estimated_total = inputs
+            .speech_tensor
+            .dims3()
+            .map(|(_, _, samples)| {
+                let ratio = self.config.encoder_ratios_product().unwrap_or(3200);
+                samples.div_ceil(ratio)
+            })
+            .unwrap_or(0);
         let input_ids = Tensor::from_vec(
             inputs.prompt_token_ids.clone(),
             (1, inputs.prompt_token_ids.len()),
@@ -232,10 +238,27 @@ impl VibeVoiceAsrModel {
                 break;
             }
             generated.push(next_token);
+            if let Some(progress) = progress {
+                let piece = self
+                    .decoder_tokenizer
+                    .decode(&[next_token], true)
+                    .map_err(VibeVoiceAsrError::Tokenizer)?;
+                if !piece.is_empty() {
+                    progress.on_token(&piece);
+                }
+            }
+            if let Some(progress) = progress
+                && generated.len().is_multiple_of(225)
+            {
+                progress.on_generation_progress(generated.len(), estimated_total);
+            }
             let next = Tensor::from_vec(vec![next_token], (1, 1), &self.device)?;
             let logits = self.decoder.forward(&next, offset)?;
             offset += 1;
             next_token = logits_argmax(&logits)?;
+        }
+        if let Some(progress) = progress {
+            progress.on_generation_progress(generated.len(), estimated_total);
         }
 
         self.decoder_tokenizer

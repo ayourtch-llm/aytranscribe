@@ -145,11 +145,11 @@ impl TranscriptionProgress for CliProgress {
     }
 
     fn on_chunk_start(&self, chunk_index: usize, total_chunks: usize, start_time_secs: f64) {
+        let end_time_secs = (start_time_secs + self.chunk_duration_secs).min(self.total_duration_secs);
         if total_chunks <= 1 {
             println!("Processing...");
             return;
         }
-        let end_time_secs = (start_time_secs + self.chunk_duration_secs).min(self.total_duration_secs);
         println!(
             "[{chunk_index}/{total_chunks}] Processing {}-{}...",
             format_clock(start_time_secs),
@@ -157,7 +157,12 @@ impl TranscriptionProgress for CliProgress {
         );
     }
 
+    fn on_token(&self, text: &str) {
+        eprint!("{text}");
+    }
+
     fn on_chunk_complete(&self, chunk_index: usize, partial_result: &str) {
+        eprintln!();
         if let Err(err) = self
             .writer
             .lock()
@@ -172,6 +177,7 @@ impl TranscriptionProgress for CliProgress {
     }
 
     fn on_complete(&self, full_result: &str) {
+        eprintln!();
         if let Err(err) = self
             .writer
             .lock()
