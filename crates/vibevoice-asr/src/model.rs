@@ -402,7 +402,120 @@ mod tests {
     use super::*;
     use candle_core::{DType, Device};
     use candle_nn::{VarBuilder, VarMap};
+    use std::path::Path;
+    use tokenizers::{
+        AddedToken, Tokenizer, models::wordlevel::WordLevel,
+        pre_tokenizers::whitespace::Whitespace,
+    };
     use vibevoice_core::VibeVoiceASRConfig;
+
+    fn test_decoder_tokenizer() -> Tokenizer {
+        let vocab = [
+            ("[UNK]", 0u32),
+            ("<|endoftext|>", 1),
+            ("<|speech_start|>", 2),
+            ("<|speech_pad|>", 3),
+            ("<|speech_end|>", 4),
+            ("<|im_start|>", 5),
+            ("<|im_end|>", 6),
+            ("system", 7),
+            ("user", 8),
+            ("assistant", 9),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".into())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace::default()));
+        tokenizer.add_special_tokens(&[
+            AddedToken::from("<|endoftext|>", true),
+            AddedToken::from("<|speech_start|>", true),
+            AddedToken::from("<|speech_pad|>", true),
+            AddedToken::from("<|speech_end|>", true),
+            AddedToken::from("<|im_start|>", true),
+            AddedToken::from("<|im_end|>", true),
+        ]);
+        tokenizer
+    }
+
+    fn write_test_tokenizer(path: &Path) {
+        test_decoder_tokenizer().save(path, false).unwrap();
+    }
+
+    fn tiny_asr_model() -> VibeVoiceAsrModel {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let config = VibeVoiceASRConfig {
+            decoder_config: vibevoice_core::Qwen2DecoderConfig {
+                vocab_size: 10,
+                hidden_size: 16,
+                intermediate_size: 32,
+                num_hidden_layers: 2,
+                num_attention_heads: 4,
+                num_key_value_heads: 2,
+                max_position_embeddings: 64,
+                sliding_window: Some(32),
+                max_window_layers: 2,
+                tie_word_embeddings: false,
+                rope_theta: 10_000.0,
+                rms_norm_eps: 1e-6,
+                use_sliding_window: false,
+                hidden_act: "silu".to_string(),
+                attention_dropout: 0.0,
+                initializer_range: 0.02,
+                torch_dtype: Some(vibevoice_core::DTypeName::F32),
+            },
+            ..Default::default()
+        };
+        let acoustic_tokenizer = VibeVoiceAcousticTokenizerModel::load_hf_encoder(
+            &config.acoustic_tokenizer_config,
+            vb.pp("acoustic_tokenizer_encoder"),
+        )
+        .unwrap();
+        let semantic_tokenizer = VibeVoiceSemanticTokenizerModel::load_hf_encoder(
+            &config.semantic_tokenizer_config,
+            vb.pp("semantic_tokenizer_encoder"),
+        )
+        .unwrap();
+        let acoustic_connector = SpeechConnector::load(
+            config.acoustic_vae_dim(),
+            config.decoder_config.hidden_size,
+            vb.pp("acoustic_connector"),
+        )
+        .unwrap();
+        let semantic_connector = SpeechConnector::load(
+            config.semantic_vae_dim(),
+            config.decoder_config.hidden_size,
+            vb.pp("semantic_connector"),
+        )
+        .unwrap();
+        let decoder_cfg = to_candle_qwen2_config(&config.decoder_config).unwrap();
+        let decoder = qwen2::ModelForCausalLM::new(
+            &decoder_cfg,
+            vb.pp("language_model").pp("model"),
+            Some(vb.pp("language_model").pp("lm_head")),
+        )
+        .unwrap();
+        let decoder_tokenizer = test_decoder_tokenizer();
+        let eos_token_id = decoder_tokenizer.token_to_id("<|endoftext|>");
+        VibeVoiceAsrModel {
+            config,
+            acoustic_tokenizer,
+            semantic_tokenizer,
+            acoustic_connector,
+            semantic_connector,
+            decoder,
+            decoder_tokenizer,
+            device: Device::Cpu,
+            model_dtype: DType::F32,
+            eos_token_id,
+        }
+    }
 
     #[test]
     fn speech_connector_preserves_shape() {
@@ -444,6 +557,68 @@ mod tests {
         let files = find_weight_files(&dir).unwrap();
         assert_eq!(files.len(), 2);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_from_json_string_converts_to_qwen2() {
+        let json = r#"{
+            "decoder_config": {
+                "vocab_size": 128,
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_hidden_layers": 4,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 2,
+                "max_position_embeddings": 256,
+                "sliding_window": null,
+                "hidden_act": "silu",
+                "torch_dtype": "float32"
+            }
+        }"#;
+        let cfg = VibeVoiceASRConfig::from_reader(json.as_bytes()).unwrap();
+        let qcfg = to_candle_qwen2_config(&cfg.decoder_config).unwrap();
+        assert_eq!(qcfg.hidden_size, 64);
+        assert_eq!(qcfg.sliding_window, 256);
+    }
+
+    #[test]
+    fn encode_speech_returns_aligned_feature_shapes() {
+        let model = tiny_asr_model();
+        let speech = Tensor::zeros((1, 1, 3200), DType::F32, &Device::Cpu).unwrap();
+        let session = model.encode_speech(&speech).unwrap();
+        let acoustic = session.acoustic_features.dims3().unwrap();
+        let semantic = session.semantic_features.dims3().unwrap();
+        let combined = session.combined_features.dims3().unwrap();
+        assert_eq!(acoustic, semantic);
+        assert_eq!(combined, acoustic);
+    }
+
+    #[test]
+    fn processor_from_tokenizer_uses_encoder_ratio_product() {
+        let model = tiny_asr_model();
+        let processor = model.processor_from_tokenizer().unwrap();
+        assert_eq!(processor.speech_tok_compress_ratio(), 3200);
+    }
+
+    #[test]
+    fn transcribe_inputs_returns_empty_for_zero_max_tokens() {
+        let mut model = tiny_asr_model();
+        let inputs = VibeVoiceAsrInputs {
+            prompt_token_ids: vec![2, 3, 4],
+            acoustic_input_mask: vec![false, true, false],
+            speech_tensor: Tensor::zeros((1, 1, 3200), DType::F32, &Device::Cpu).unwrap(),
+            sample_rate: 24_000,
+        };
+        let output = model.transcribe_inputs(&inputs, 0).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn transcribe_marks_trailing_audio_slots() {
+        let mut model = tiny_asr_model();
+        let speech = Tensor::zeros((1, 1, 6400), DType::F32, &Device::Cpu).unwrap();
+        let output = model.transcribe(&[2, 3, 4], &speech, 0).unwrap();
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -520,6 +695,46 @@ mod tests {
         let files = find_weight_files(&dir).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].file_name().and_then(|v| v.to_str()), Some("shared.safetensors"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_local_dir_errors_when_tokenizer_file_is_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "vibevoice-asr-local-missing-tok-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("config.json"),
+            serde_json::to_vec(&VibeVoiceASRConfig::default()).unwrap(),
+        )
+        .unwrap();
+        let err =
+            VibeVoiceAsrModel::from_local_dir(&dir, dir.join("missing-tokenizer.json"), Device::Cpu)
+                .unwrap_err();
+        assert!(matches!(err, VibeVoiceAsrError::Tokenizer(_)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_local_dir_errors_when_weights_are_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "vibevoice-asr-local-missing-weights-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("config.json"),
+            serde_json::to_vec(&VibeVoiceASRConfig::default()).unwrap(),
+        )
+        .unwrap();
+        let tokenizer_path = dir.join("tokenizer.json");
+        write_test_tokenizer(&tokenizer_path);
+        let err = VibeVoiceAsrModel::from_local_dir(&dir, &tokenizer_path, Device::Cpu).unwrap_err();
+        assert!(matches!(err, VibeVoiceAsrError::InvalidInput(_)));
         let _ = fs::remove_dir_all(&dir);
     }
 

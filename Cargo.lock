@@ -117,6 +117,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_json",
+ "tokenizers 0.20.4",
  "vibevoice-asr",
  "vibevoice-core",
 ]
