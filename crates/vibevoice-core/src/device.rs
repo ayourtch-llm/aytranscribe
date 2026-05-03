@@ -52,4 +52,13 @@ mod tests {
     fn auto_device_resolves() {
         let _ = DeviceSpec::Auto.resolve().unwrap();
     }
+
+    #[test]
+    fn cuda_device_without_feature_errors_or_resolves() {
+        let result = DeviceSpec::Cuda(0).resolve();
+        #[cfg(not(feature = "cuda"))]
+        assert!(matches!(result, Err(VibeVoiceCoreError::UnsupportedConfig(_))));
+        #[cfg(feature = "cuda")]
+        let _ = result;
+    }
 }

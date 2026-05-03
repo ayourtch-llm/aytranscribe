@@ -914,4 +914,120 @@ mod tests {
         let output = norm.forward(&input).unwrap();
         assert_eq!(output.dims3().unwrap(), (1, 2, 5));
     }
+
+    #[test]
+    fn ffn_preserves_last_dimension() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let ffn = Ffn::new(8, 16, true, vb).unwrap();
+        let input = Tensor::zeros((1, 4, 8), DType::F32, &Device::Cpu).unwrap();
+        let output = ffn.forward(&input).unwrap();
+        assert_eq!(output.dims3().unwrap(), (1, 4, 8));
+    }
+
+    #[test]
+    fn block1d_forward_preserves_shape() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let block = Block1D::new(8, 7, true, true, true, vb).unwrap();
+        let input = Tensor::zeros((1, 8, 17), DType::F32, &Device::Cpu).unwrap();
+        let output = block.forward(&input).unwrap();
+        assert_eq!(output.dims3().unwrap(), (1, 8, 17));
+    }
+
+    #[test]
+    fn block1d_forward_handles_short_sequences() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let block = Block1D::new(8, 7, true, true, true, vb).unwrap();
+        let input = Tensor::zeros((1, 8, 2), DType::F32, &Device::Cpu).unwrap();
+        let output = block.forward(&input).unwrap();
+        assert_eq!(output.dims3().unwrap(), (1, 8, 2));
+    }
+
+    #[test]
+    fn pad_tensor1d_preserves_dtype_and_shape() {
+        let input = Tensor::zeros((1, 2, 3), DType::F32, &Device::Cpu).unwrap();
+        let output = pad_tensor1d(&input, 2, 1, 0.0).unwrap();
+        assert_eq!(output.dims3().unwrap(), (1, 2, 6));
+        assert_eq!(output.dtype(), DType::F32);
+    }
+
+    #[test]
+    fn trim_tensor1d_errors_on_invalid_trim() {
+        let input = Tensor::zeros((1, 2, 3), DType::F32, &Device::Cpu).unwrap();
+        assert!(matches!(trim_tensor1d(&input, 2, 2), Err(VibeVoiceTokenizerError::InvalidShape(_))));
+    }
+
+    #[test]
+    fn trim_tensor1d_keeps_expected_window() {
+        let input =
+            Tensor::from_vec((0..10).map(|v| v as f32).collect::<Vec<_>>(), (1, 1, 10), &Device::Cpu)
+                .unwrap();
+        let output = trim_tensor1d(&input, 2, 3)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(output, vec![2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn acoustic_model_sets_gaussian_fixed_std() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let model = VibeVoiceAcousticTokenizerModel::load(
+            &VibeVoiceAcousticTokenizerConfig::default(),
+            vb,
+        )
+        .unwrap();
+        let input = Tensor::zeros((1, 1, 3200), DType::F32, &Device::Cpu).unwrap();
+        let output = model.encode(&input).unwrap();
+        assert_eq!(output.fixed_std, Some(0.5));
+    }
+
+    #[test]
+    fn acoustic_model_decode_without_decoder_weights_errors() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let model = VibeVoiceAcousticTokenizerModel::load_hf_encoder(
+            &VibeVoiceAcousticTokenizerConfig::default(),
+            vb,
+        )
+        .unwrap();
+        let input = Tensor::zeros((1, 1, 64), DType::F32, &Device::Cpu).unwrap();
+        assert!(matches!(
+            model.decode(&input),
+            Err(VibeVoiceTokenizerError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn semantic_model_hop_length_matches_config() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let model = VibeVoiceSemanticTokenizerModel::load(
+            &VibeVoiceSemanticTokenizerConfig::default(),
+            vb,
+        )
+        .unwrap();
+        assert_eq!(model.hop_length(), 3200);
+    }
+
+    #[test]
+    fn encoder_rejects_invalid_rank() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let encoder = TokenizerEncoder::load_acoustic(
+            &VibeVoiceAcousticTokenizerConfig::default(),
+            vb,
+        )
+        .unwrap();
+        let bad = Tensor::zeros((1, 3200), DType::F32, &Device::Cpu).unwrap();
+        assert!(matches!(
+            encoder.forward(&bad),
+            Err(VibeVoiceTokenizerError::InvalidShape(_))
+        ));
+    }
 }

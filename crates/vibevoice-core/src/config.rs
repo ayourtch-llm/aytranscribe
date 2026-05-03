@@ -472,4 +472,56 @@ mod tests {
         assert_eq!(config.semantic_vae_dim(), 128);
         assert_eq!(config.encoder_ratios_product().unwrap(), 3200);
     }
+
+    #[test]
+    fn config_round_trip_serialization() {
+        let config = VibeVoiceASRConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: VibeVoiceASRConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.decoder_config.hidden_size, config.decoder_config.hidden_size);
+        assert_eq!(parsed.acoustic_vae_dim(), config.acoustic_vae_dim());
+    }
+
+    #[test]
+    fn partial_config_uses_defaults() {
+        let parsed: VibeVoiceASRConfig =
+            serde_json::from_str(r#"{"decoder_config":{"hidden_size":1024}}"#).unwrap();
+        assert_eq!(parsed.decoder_config.hidden_size, 1024);
+        assert_eq!(parsed.decoder_config.vocab_size, default_vocab_size());
+        assert_eq!(parsed.acoustic_tokenizer_config.encoder_ratios, default_encoder_ratios());
+    }
+
+    #[test]
+    fn dtype_aliases_deserialize() {
+        let bf16: DTypeName = serde_json::from_str(r#""bfloat16""#).unwrap();
+        let f16: DTypeName = serde_json::from_str(r#""float16""#).unwrap();
+        let f32: DTypeName = serde_json::from_str(r#""float32""#).unwrap();
+        assert_eq!(bf16, DTypeName::Bf16);
+        assert_eq!(f16, DTypeName::F16);
+        assert_eq!(f32, DTypeName::F32);
+    }
+
+    #[test]
+    fn from_reader_accepts_partial_json() {
+        let json = br#"{"semantic_vae_dim":256,"decoder_config":{"torch_dtype":"float16"}}"#;
+        let parsed = VibeVoiceASRConfig::from_reader(&json[..]).unwrap();
+        assert_eq!(parsed.semantic_vae_dim(), 256);
+        assert_eq!(parsed.decoder_config.torch_dtype, Some(DTypeName::F16));
+        assert_eq!(parsed.acoustic_vae_dim(), default_acoustic_vae_dim());
+    }
+
+    #[test]
+    fn encoder_ratio_overflow_is_reported() {
+        let config = VibeVoiceASRConfig {
+            acoustic_tokenizer_config: VibeVoiceAcousticTokenizerConfig {
+                encoder_ratios: vec![usize::MAX, 2],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            config.encoder_ratios_product(),
+            Err(VibeVoiceCoreError::UnsupportedConfig(_))
+        ));
+    }
 }

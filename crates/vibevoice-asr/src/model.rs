@@ -400,9 +400,8 @@ struct SafeTensorIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use candle_core::{DType, Device};
     use candle_nn::{VarBuilder, VarMap};
-    use candle_core::DType;
     use vibevoice_core::VibeVoiceASRConfig;
 
     #[test]
@@ -445,5 +444,89 @@ mod tests {
         let files = find_weight_files(&dir).unwrap();
         assert_eq!(files.len(), 2);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_weight_files_falls_back_to_plain_safetensors() {
+        let dir = std::env::temp_dir().join(format!("vibevoice-asr-plain-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.safetensors"), b"").unwrap();
+        fs::write(dir.join("b.safetensors"), b"").unwrap();
+        let files = find_weight_files(&dir).unwrap();
+        assert_eq!(files.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_weight_files_errors_when_missing() {
+        let dir = std::env::temp_dir().join(format!("vibevoice-asr-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert!(matches!(find_weight_files(&dir), Err(VibeVoiceAsrError::InvalidInput(_))));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn speech_feature_replacement_errors_on_length_mismatch() {
+        let embeds = Tensor::zeros((1, 3, 4), DType::F32, &Device::Cpu).unwrap();
+        let speech = Tensor::zeros((1, 2, 4), DType::F32, &Device::Cpu).unwrap();
+        let err = apply_speech_features(embeds, &[true, false, false], &speech).unwrap_err();
+        assert!(matches!(err, VibeVoiceAsrError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn speech_feature_replacement_errors_on_batch_mismatch() {
+        let embeds = Tensor::zeros((2, 3, 4), DType::F32, &Device::Cpu).unwrap();
+        let speech = Tensor::zeros((1, 1, 4), DType::F32, &Device::Cpu).unwrap();
+        let err = apply_speech_features(embeds, &[true, false, false], &speech).unwrap_err();
+        assert!(matches!(err, VibeVoiceAsrError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn speech_feature_replacement_errors_on_mask_length_mismatch() {
+        let embeds = Tensor::zeros((1, 3, 4), DType::F32, &Device::Cpu).unwrap();
+        let speech = Tensor::zeros((1, 1, 4), DType::F32, &Device::Cpu).unwrap();
+        let err = apply_speech_features(embeds, &[true, false], &speech).unwrap_err();
+        assert!(matches!(err, VibeVoiceAsrError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn speech_feature_replacement_errors_on_hidden_mismatch() {
+        let embeds = Tensor::zeros((1, 3, 5), DType::F32, &Device::Cpu).unwrap();
+        let speech = Tensor::zeros((1, 1, 4), DType::F32, &Device::Cpu).unwrap();
+        let err = apply_speech_features(embeds, &[true, false, false], &speech).unwrap_err();
+        assert!(matches!(err, VibeVoiceAsrError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn speech_connector_load_hf_rejects_unknown_modality() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let err = SpeechConnector::load_hf(vb, "video", 4, 8).unwrap_err();
+        assert!(matches!(err, VibeVoiceAsrError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn find_weight_files_deduplicates_index_entries() {
+        let dir = std::env::temp_dir().join(format!("vibevoice-asr-dedupe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("model.safetensors.index.json"),
+            r#"{"weight_map":{"a":"shared.safetensors","b":"shared.safetensors"}}"#,
+        )
+        .unwrap();
+        let files = find_weight_files(&dir).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_name().and_then(|v| v.to_str()), Some("shared.safetensors"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn qwen2_config_rejects_unknown_activation() {
+        let mut cfg = vibevoice_core::Qwen2DecoderConfig::default();
+        cfg.hidden_act = "relu".to_string();
+        assert!(matches!(to_candle_qwen2_config(&cfg), Err(VibeVoiceAsrError::Unsupported(_))));
     }
 }

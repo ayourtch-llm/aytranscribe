@@ -227,4 +227,61 @@ mod tests {
         let normalized = AudioNormalizer::default().normalize(&[]);
         assert!(normalized.is_empty());
     }
+
+    #[test]
+    fn stereo_downmix_averages_channels() {
+        let mut mono = Vec::new();
+        push_interleaved_mono_from_interleaved(2, &[1.0, -1.0, 0.5, 0.25], &mut mono);
+        assert_eq!(mono, vec![0.0, 0.375]);
+    }
+
+    #[test]
+    fn mono_passthrough_keeps_samples() {
+        let mut mono = Vec::new();
+        push_interleaved_mono_from_interleaved(1, &[0.1, 0.2, 0.3], &mut mono);
+        assert_eq!(mono, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn normalizer_scales_loud_audio_below_clipping() {
+        let input = vec![2.0, -2.0, 1.5, -1.5];
+        let normalized = AudioNormalizer::default().normalize(&input);
+        let peak = normalized.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+        assert!(peak <= 1.0);
+    }
+
+    #[test]
+    fn normalizer_boosts_quiet_audio() {
+        let input = vec![0.001, -0.001, 0.001, -0.001];
+        let normalized = AudioNormalizer::default().normalize(&input);
+        let input_rms = (input.iter().map(|v| v * v).sum::<f32>() / input.len() as f32).sqrt();
+        let output_rms =
+            (normalized.iter().map(|v| v * v).sum::<f32>() / normalized.len() as f32).sqrt();
+        assert!(output_rms > input_rms);
+    }
+
+    #[test]
+    fn normalizer_keeps_silence_finite() {
+        let normalized = AudioNormalizer::default().normalize(&[0.0, 0.0, 0.0]);
+        assert_eq!(normalized, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn normalizer_preserves_sample_count() {
+        let input = vec![0.2, -0.4, 0.8, -0.6, 0.1];
+        let normalized = AudioNormalizer::default().normalize(&input);
+        assert_eq!(normalized.len(), input.len());
+    }
+
+    #[test]
+    fn resampler_handles_short_audio() {
+        let output = resample_to_24khz(&[0.0, 0.1, -0.1], 16_000).unwrap();
+        assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn resampler_handles_empty_audio() {
+        let output = resample_to_24khz(&[], 16_000).unwrap();
+        assert!(output.is_empty());
+    }
 }

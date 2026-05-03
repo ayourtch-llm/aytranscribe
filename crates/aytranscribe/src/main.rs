@@ -91,4 +91,25 @@ mod tests {
     fn parse_device_rejects_invalid_value() {
         assert!(parse_device("gpu").is_err());
     }
+
+    #[test]
+    fn cli_rejects_missing_output_arg() {
+        assert!(Cli::try_parse_from(["aytranscribe", "sample.wav"]).is_err());
+    }
+
+    #[test]
+    fn parse_device_accepts_auto_and_cuda() {
+        assert!(matches!(parse_device("auto").unwrap(), DeviceSpec::Auto));
+        assert!(matches!(parse_device("cuda:1").unwrap(), DeviceSpec::Cuda(1)));
+    }
+
+    #[test]
+    fn parse_device_accepts_cpu() {
+        assert!(matches!(parse_device("cpu").unwrap(), DeviceSpec::Cpu));
+    }
+
+    #[test]
+    fn parse_device_rejects_malformed_cuda_index() {
+        assert!(parse_device("cuda:not-a-number").is_err());
+    }
 }

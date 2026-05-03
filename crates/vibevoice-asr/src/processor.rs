@@ -226,6 +226,38 @@ mod tests {
         tokenizer
     }
 
+    fn alias_tokenizer() -> Tokenizer {
+        let vocab = [
+            ("[UNK]", 0u32),
+            ("<|object_ref_start|>", 1),
+            ("<|box_start|>", 2),
+            ("<|object_ref_end|>", 3),
+            ("<|im_start|>", 4),
+            ("<|im_end|>", 5),
+            ("system", 6),
+            ("user", 7),
+            ("assistant", 8),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".into())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace::default()));
+        tokenizer.add_special_tokens(&[
+            AddedToken::from("<|object_ref_start|>", true),
+            AddedToken::from("<|box_start|>", true),
+            AddedToken::from("<|object_ref_end|>", true),
+            AddedToken::from("<|im_start|>", true),
+            AddedToken::from("<|im_end|>", true),
+        ]);
+        tokenizer
+    }
+
     #[test]
     fn processor_builds_prompt_without_context() {
         let processor = VibeVoiceAsrProcessor::new(test_tokenizer(), 3200).unwrap();
@@ -248,5 +280,59 @@ mod tests {
         let speech_tensor = Tensor::zeros((2, 1, 100), candle_core::DType::F32, &Device::Cpu).unwrap();
         let err = processor.prepare_audio_tensor(speech_tensor, 100, None).unwrap_err();
         assert!(matches!(err, VibeVoiceAsrError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn prompt_handles_empty_context_same_as_none() {
+        let processor = VibeVoiceAsrProcessor::new(test_tokenizer(), 3200).unwrap();
+        let (_, mask_none) = processor.build_prompt(4, 1.25, None).unwrap();
+        let (_, mask_empty) = processor.build_prompt(4, 1.25, Some("   ")).unwrap();
+        assert_eq!(mask_none, mask_empty);
+    }
+
+    #[test]
+    fn prompt_handles_special_characters_in_context() {
+        let processor = VibeVoiceAsrProcessor::new(test_tokenizer(), 3200).unwrap();
+        let (ids, mask) = processor
+            .build_prompt(1, 2.0, Some("hotword! @#$%^&*()"))
+            .unwrap();
+        assert_eq!(ids.len(), mask.len());
+        assert_eq!(mask.iter().filter(|v| **v).count(), 1);
+    }
+
+    #[test]
+    fn prepare_audio_tensor_uses_duration_to_size_mask() {
+        let processor = VibeVoiceAsrProcessor::new(test_tokenizer(), 3200).unwrap();
+        let speech_tensor = Tensor::zeros((1, 1, 6401), candle_core::DType::F32, &Device::Cpu).unwrap();
+        let inputs = processor.prepare_audio_tensor(speech_tensor, 6401, None).unwrap();
+        assert_eq!(inputs.acoustic_input_mask.iter().filter(|v| **v).count(), 3);
+    }
+
+    #[test]
+    fn processor_accepts_hf_alias_tokens() {
+        let processor = VibeVoiceAsrProcessor::new(alias_tokenizer(), 3200).unwrap();
+        let (ids, mask) = processor.build_prompt(2, 0.25, None).unwrap();
+        assert_eq!(ids.len(), mask.len());
+        assert_eq!(mask.iter().filter(|v| **v).count(), 2);
+    }
+
+    #[test]
+    fn processor_rejects_missing_speech_tokens() {
+        let vocab = [("[UNK]", 0u32)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".into())
+            .build()
+            .unwrap();
+        let tokenizer = Tokenizer::new(model);
+        let err = VibeVoiceAsrProcessor::new(tokenizer, 3200).unwrap_err();
+        assert!(matches!(err, VibeVoiceAsrError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn build_user_suffix_trims_context() {
+        let suffix = build_user_suffix(1.0, Some("  hotword  "));
+        assert!(suffix.contains("extra info: hotword"));
+        assert!(!suffix.contains("  hotword  "));
     }
 }

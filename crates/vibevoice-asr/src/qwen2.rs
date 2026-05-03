@@ -475,4 +475,42 @@ mod tests {
         let logits = model.forward_embeds(&input_embeds, 0, None).unwrap();
         assert_eq!(logits.dims3().unwrap(), (1, 1, cfg.vocab_size));
     }
+
+    #[test]
+    fn attention_mask_expands_to_4d() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let cfg = tiny_config();
+        let model = Model::new(&cfg, vb).unwrap();
+        let mask = Tensor::from_vec(vec![1u8, 1, 0], (1, 3), &Device::Cpu).unwrap();
+        let prepared = model.prepare_attention_mask(&mask).unwrap();
+        assert_eq!(prepared.dims4().unwrap(), (1, 1, 3, 3));
+    }
+
+    #[test]
+    fn causal_mask_accounts_for_offset() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let cfg = tiny_config();
+        let model = Model::new(&cfg, vb).unwrap();
+        let mask = model.prepare_causal_attention_mask(1, 2, 3).unwrap();
+        assert_eq!(mask.dims4().unwrap(), (1, 1, 2, 5));
+    }
+
+    #[test]
+    fn clear_kv_cache_is_idempotent() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let cfg = tiny_config();
+        let mut model = ModelForCausalLM::new(&cfg, vb, None).unwrap();
+        model.clear_kv_cache();
+        model.clear_kv_cache();
+    }
+
+    #[test]
+    fn repeat_kv_expands_heads() {
+        let xs = Tensor::zeros((1, 2, 3, 4), DType::F32, &Device::Cpu).unwrap();
+        let ys = repeat_kv(xs, 2).unwrap();
+        assert_eq!(ys.dims4().unwrap(), (1, 4, 3, 4));
+    }
 }
