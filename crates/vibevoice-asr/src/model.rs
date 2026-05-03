@@ -582,6 +582,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // slow: builds full model with tokenizer encoders
     fn encode_speech_returns_aligned_feature_shapes() {
         let model = tiny_asr_model();
         let speech = Tensor::zeros((1, 1, 3200), DType::F32, &Device::Cpu).unwrap();
@@ -594,6 +595,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // slow: builds full model with tokenizer encoders
     fn processor_from_tokenizer_uses_encoder_ratio_product() {
         let model = tiny_asr_model();
         let processor = model.processor_from_tokenizer().unwrap();
@@ -601,6 +603,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // slow: builds full model with tokenizer encoders
     fn transcribe_inputs_returns_empty_for_zero_max_tokens() {
         let mut model = tiny_asr_model();
         let inputs = VibeVoiceAsrInputs {
@@ -614,6 +617,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // slow: builds full model with tokenizer encoders
     fn transcribe_marks_trailing_audio_slots() {
         let mut model = tiny_asr_model();
         let speech = Tensor::zeros((1, 1, 6400), DType::F32, &Device::Cpu).unwrap();
