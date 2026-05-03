@@ -15,9 +15,9 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
-candle-core = { version = "0.8", default-features = false }
-candle-nn = { version = "0.8", default-features = false }
-candle-transformers = { version = "0.8", default-features = false }
+candle-core = { version = "0.10", default-features = false }
+candle-nn = { version = "0.10", default-features = false }
+candle-transformers = { version = "0.10", default-features = false }
 clap = { version = "4.5", features = ["derive"] }
 hf-hub = "0.4"
 serde = { version = "1", features = ["derive"] }

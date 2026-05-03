@@ -10,6 +10,7 @@ cuda = [
     "candle-nn/cuda",
     "candle-transformers/cuda",
     "vibevoice-core/cuda",
+    "vibevoice-tokenizer/cuda",
 ]
 
 [dependencies]

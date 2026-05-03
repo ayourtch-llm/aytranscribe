@@ -69,6 +69,7 @@ pub struct VibeVoiceAsrModel {
     pub decoder: qwen2::ModelForCausalLM,
     pub decoder_tokenizer: Tokenizer,
     pub device: Device,
+    pub model_dtype: DType,
     eos_token_id: Option<u32>,
 }
 
@@ -140,6 +141,7 @@ impl VibeVoiceAsrModel {
             decoder,
             decoder_tokenizer: tokenizer,
             device,
+            model_dtype: load_dtype,
             eos_token_id,
         })
     }
@@ -165,10 +167,11 @@ impl VibeVoiceAsrModel {
     }
 
     pub fn encode_speech(&self, speech_tensor: &Tensor) -> Result<VibeVoiceAsrSession> {
-        let acoustic_latents = self.acoustic_tokenizer.encode(speech_tensor)?.sample();
+        let speech_tensor = speech_tensor.to_dtype(self.model_dtype)?;
+        let acoustic_latents = self.acoustic_tokenizer.encode(&speech_tensor)?.sample();
         let acoustic_features = self.acoustic_connector.forward(&acoustic_latents)?;
 
-        let semantic_latents = self.semantic_tokenizer.encode(speech_tensor)?.sample();
+        let semantic_latents = self.semantic_tokenizer.encode(&speech_tensor)?.sample();
         let semantic_features = self.semantic_connector.forward(&semantic_latents)?;
         let acoustic_shape = acoustic_features.dims3()?;
         let semantic_shape = semantic_features.dims3()?;
