@@ -1,0 +1,12 @@
+[package]
+name = "vibevoice-tokenizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+candle-core.workspace = true
+candle-nn.workspace = true
+thiserror.workspace = true
+vibevoice-core = { path = "../vibevoice-core" }
+
