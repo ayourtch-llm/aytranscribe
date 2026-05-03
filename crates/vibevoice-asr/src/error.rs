@@ -9,6 +9,12 @@ pub enum VibeVoiceAsrError {
     Core(#[from] vibevoice_core::VibeVoiceCoreError),
 
     #[error(transparent)]
+    HfHub(#[from] hf_hub::api::sync::ApiError),
+
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+
+    #[error(transparent)]
     Tokenizer(#[from] tokenizers::Error),
 
     #[error(transparent)]
@@ -25,4 +31,3 @@ pub enum VibeVoiceAsrError {
 }
 
 pub type Result<T> = std::result::Result<T, VibeVoiceAsrError>;
-

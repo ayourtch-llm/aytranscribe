@@ -28,3 +28,13 @@ impl DeviceSpec {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_device_resolves() {
+        let device = DeviceSpec::Cpu.resolve().unwrap();
+        assert!(matches!(device, Device::Cpu));
+    }
+}

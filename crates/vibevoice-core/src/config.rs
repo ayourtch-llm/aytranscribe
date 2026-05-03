@@ -5,9 +5,12 @@ use crate::error::{Result, VibeVoiceCoreError};
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DTypeName {
+    #[serde(alias = "float16")]
     F16,
+    #[serde(alias = "float32")]
     #[default]
     F32,
+    #[serde(alias = "bfloat16")]
     Bf16,
 }
 
@@ -229,8 +232,8 @@ pub struct Qwen2DecoderConfig {
     pub num_key_value_heads: usize,
     #[serde(default = "default_positions")]
     pub max_position_embeddings: usize,
-    #[serde(default = "default_sliding_window")]
-    pub sliding_window: usize,
+    #[serde(default)]
+    pub sliding_window: Option<usize>,
     #[serde(default = "default_max_window_layers")]
     pub max_window_layers: usize,
     #[serde(default)]
@@ -261,7 +264,7 @@ impl Default for Qwen2DecoderConfig {
             num_attention_heads: default_attention_heads(),
             num_key_value_heads: default_kv_heads(),
             max_position_embeddings: default_positions(),
-            sliding_window: default_sliding_window(),
+            sliding_window: Some(default_sliding_window()),
             max_window_layers: default_max_window_layers(),
             tie_word_embeddings: false,
             rope_theta: default_rope_theta(),
@@ -454,3 +457,19 @@ fn default_hidden_act() -> String {
     "silu".to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parses_real_vibevoice_config_json() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tmp/VibeVoice/vibevoice/configs/qwen2.5_7b_32k.json");
+        let config = VibeVoiceASRConfig::from_path(path).unwrap();
+        assert_eq!(config.decoder_config.hidden_size, 3584);
+        assert_eq!(config.acoustic_vae_dim(), 64);
+        assert_eq!(config.semantic_vae_dim(), 128);
+        assert_eq!(config.encoder_ratios_product().unwrap(), 3200);
+    }
+}

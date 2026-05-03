@@ -26,3 +26,14 @@ pub enum VibeVoiceCoreError {
     InvalidInput(String),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn io_error_converts() {
+        let err: VibeVoiceCoreError =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "missing").into();
+        assert!(matches!(err, VibeVoiceCoreError::Io(_)));
+    }
+}

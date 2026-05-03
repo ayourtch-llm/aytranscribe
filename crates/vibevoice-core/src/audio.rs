@@ -180,3 +180,50 @@ fn resample_to_24khz(input: &[f32], input_sample_rate: u32) -> Result<Vec<f32>> 
     Ok(output)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, path::{Path, PathBuf}};
+
+    fn write_test_wav(path: &Path, sample_rate: u32, samples: &[i16]) {
+        let byte_rate = sample_rate * 2;
+        let block_align = 2u16;
+        let data_len = (samples.len() * 2) as u32;
+        let riff_len = 36 + data_len;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&riff_len.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn loads_and_resamples_wav() {
+        let path = PathBuf::from(std::env::temp_dir())
+            .join(format!("vibevoice-core-audio-{}.wav", std::process::id()));
+        let samples: Vec<i16> = (0..8000).map(|i| ((i % 128) as i16) * 64).collect();
+        write_test_wav(&path, 8_000, &samples);
+        let audio = load_audio_file(&path, false).unwrap();
+        assert_eq!(audio.sample_rate, TARGET_SAMPLE_RATE);
+        assert!(!audio.samples.is_empty());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn normalizer_avoids_empty_panics() {
+        let normalized = AudioNormalizer::default().normalize(&[]);
+        assert!(normalized.is_empty());
+    }
+}

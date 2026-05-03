@@ -28,17 +28,17 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    run(cli)
+}
+
+fn run(cli: Cli) -> Result<()> {
     let device = parse_device(&cli.device)?.resolve()?;
     let processor = VibeVoiceAsrProcessor::from_file(&cli.tokenizer)?;
     let inputs = processor.prepare_audio_file(&cli.audio, &device, cli.context.as_deref())?;
     let mut model =
         vibevoice_asr::VibeVoiceAsrModel::from_local_dir(&cli.model_dir, &cli.tokenizer, device)?;
 
-    let output = model.transcribe(
-        &inputs.prompt_token_ids,
-        &inputs.speech_tensor,
-        cli.max_new_tokens,
-    )?;
+    let output = model.transcribe_inputs(&inputs, cli.max_new_tokens)?;
     println!("{output}");
     Ok(())
 }
@@ -51,4 +51,31 @@ fn parse_device(spec: &str) -> Result<DeviceSpec> {
         return Ok(DeviceSpec::Cuda(rest.parse()?));
     }
     anyhow::bail!("unsupported device spec `{spec}`, use `cpu` or `cuda:N`")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn cli_parses_required_args() {
+        let cli = Cli::try_parse_from([
+            "aytranscribe",
+            "--model-dir",
+            "model",
+            "--tokenizer",
+            "tok.json",
+            "--audio",
+            "sample.wav",
+        ])
+        .unwrap();
+        assert_eq!(cli.max_new_tokens, 128);
+        assert_eq!(cli.device, "cpu");
+    }
+
+    #[test]
+    fn parse_device_rejects_invalid_value() {
+        assert!(parse_device("gpu").is_err());
+    }
 }

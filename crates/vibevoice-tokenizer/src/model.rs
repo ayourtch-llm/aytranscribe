@@ -2,9 +2,7 @@ use candle_core::{Shape, Tensor};
 use candle_nn::{Conv1d, Conv1dConfig, Module, VarBuilder, conv1d};
 
 use crate::error::{Result, VibeVoiceTokenizerError};
-use vibevoice_core::{
-    VibeVoiceAcousticTokenizerConfig, VibeVoiceSemanticTokenizerConfig,
-};
+use vibevoice_core::{VibeVoiceAcousticTokenizerConfig, VibeVoiceSemanticTokenizerConfig};
 
 #[derive(Debug, Clone)]
 pub struct TokenizerEncoderOutput {
@@ -16,6 +14,76 @@ impl TokenizerEncoderOutput {
     pub fn sample(&self) -> Tensor {
         self.mean.clone()
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RmsNorm {
+    weight: Tensor,
+    eps: f64,
+}
+
+impl RmsNorm {
+    pub fn new(dim: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            weight: if vb.contains_tensor("weight") {
+                vb.get((dim,), "weight")?
+            } else {
+                Tensor::ones((dim,), vb.dtype(), vb.device())?
+            },
+            eps,
+        })
+    }
+
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let denom = ((xs.sqr()?.sum_keepdim(candle_core::D::Minus1)? / xs.dim(candle_core::D::Minus1)? as f64)?
+            + self.eps)?
+            .sqrt()?;
+        let ys = xs.broadcast_div(&denom)?;
+        Ok(ys.broadcast_mul(&self.weight)?)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConvRmsNorm {
+    norm: RmsNorm,
+}
+
+impl ConvRmsNorm {
+    pub fn new(dim: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            norm: RmsNorm::new(dim, eps, vb)?,
+        })
+    }
+
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let xs = xs.transpose(1, 2)?;
+        let ys = self.norm.forward(&xs)?;
+        Ok(ys.transpose(1, 2)?)
+    }
+}
+
+pub fn get_extra_padding_for_conv1d(
+    input_len: usize,
+    kernel_size: usize,
+    stride: usize,
+    padding_total: usize,
+) -> usize {
+    let n_frames = (input_len.saturating_sub(kernel_size) + padding_total) as f64 / stride as f64 + 1.0;
+    let ideal_length = ((n_frames.ceil() as usize).saturating_sub(1)) * stride + (kernel_size - padding_total);
+    ideal_length.saturating_sub(input_len)
+}
+
+pub fn pad1d(xs: &[f32], left: usize, right: usize, value: f32) -> Vec<f32> {
+    let mut out = Vec::with_capacity(left + xs.len() + right);
+    out.extend(std::iter::repeat_n(value, left));
+    out.extend_from_slice(xs);
+    out.extend(std::iter::repeat_n(value, right));
+    out
+}
+
+pub fn unpad1d(xs: &[f32], left: usize, right: usize) -> Vec<f32> {
+    let end = xs.len().saturating_sub(right);
+    xs[left.min(end)..end].to_vec()
 }
 
 #[derive(Debug)]
@@ -201,3 +269,70 @@ fn _shape3(shape: &Shape) -> Option<(usize, usize, usize)> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{DType, Device};
+    use candle_nn::VarMap;
+
+    #[test]
+    fn encoder_constructs_from_config() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let encoder = TokenizerEncoder::load_acoustic(
+            &VibeVoiceAcousticTokenizerConfig::default(),
+            vb,
+        )
+        .unwrap();
+        assert_eq!(encoder.hop_length(), 3200);
+    }
+
+    #[test]
+    fn encoder_forward_has_expected_shape() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let encoder = TokenizerEncoder::load_acoustic(
+            &VibeVoiceAcousticTokenizerConfig::default(),
+            vb,
+        )
+        .unwrap();
+        let input = Tensor::zeros((1, 1, 3200), DType::F32, &Device::Cpu).unwrap();
+        let output = encoder.forward(&input).unwrap();
+        let (b, c, _t) = output.mean.dims3().unwrap();
+        assert_eq!((b, c), (1, 64));
+    }
+
+    #[test]
+    fn pad_and_unpad_round_trip() {
+        let padded = pad1d(&[1., 2., 3.], 2, 1, 0.);
+        assert_eq!(padded, vec![0., 0., 1., 2., 3., 0.]);
+        assert_eq!(unpad1d(&padded, 2, 1), vec![1., 2., 3.]);
+    }
+
+    #[test]
+    fn extra_padding_matches_ceil_behavior() {
+        assert_eq!(get_extra_padding_for_conv1d(10, 4, 3, 1), 2);
+        assert_eq!(get_extra_padding_for_conv1d(11, 4, 3, 1), 1);
+    }
+
+    #[test]
+    fn rms_norm_matches_known_values() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let norm = RmsNorm::new(2, 1e-6, vb).unwrap();
+        let input = Tensor::from_vec(vec![3f32, 4.0], (1, 2), &Device::Cpu).unwrap();
+        let output = norm.forward(&input).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert!((output[0] - 0.848528).abs() < 1e-4);
+        assert!((output[1] - 1.131370).abs() < 1e-4);
+    }
+
+    #[test]
+    fn conv_rms_norm_preserves_shape() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let norm = ConvRmsNorm::new(2, 1e-6, vb).unwrap();
+        let input = Tensor::zeros((1, 2, 5), DType::F32, &Device::Cpu).unwrap();
+        let output = norm.forward(&input).unwrap();
+        assert_eq!(output.dims3().unwrap(), (1, 2, 5));
+    }
+}
