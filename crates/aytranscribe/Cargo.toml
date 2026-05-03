@@ -4,9 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+cuda = ["vibevoice-asr/cuda", "vibevoice-core/cuda"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 vibevoice-asr = { path = "../vibevoice-asr" }
 vibevoice-core = { path = "../vibevoice-core" }
-

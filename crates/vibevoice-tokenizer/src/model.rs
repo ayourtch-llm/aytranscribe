@@ -337,7 +337,7 @@ impl Block1D {
         Ok(Self {
             norm: ConvRmsNorm::new(dim, 1e-5, vb.pp("norm"))?,
             ffn_norm: ConvRmsNorm::new(dim, 1e-5, vb.pp("ffn_norm"))?,
-            mixer: Convlayer::new(dim, kernel_size, groups, causal, bias, vb.pp("mixer"))?,
+            mixer: Convlayer::new(dim, kernel_size, groups, causal, bias, vb.pp("mixer").pp("conv"))?,
             ffn: Ffn::new(dim, dim * 4, bias, vb.pp("ffn"))?,
             gamma: if vb.contains_tensor("gamma") {
                 Some(vb.get((dim,), "gamma")?)
@@ -374,117 +374,135 @@ impl Block1D {
 }
 
 #[derive(Debug)]
+struct EncoderStem {
+    conv: SConv1d,
+    stage: Vec<Block1D>,
+}
+
+#[derive(Debug)]
+struct EncoderConvLayer {
+    conv: SConv1d,
+    stage: Vec<Block1D>,
+}
+
+#[derive(Debug)]
+struct EncoderHead {
+    conv: SConv1d,
+}
+
+#[derive(Debug)]
 pub struct TokenizerEncoder {
-    downsample_layers: Vec<Vec<SConv1d>>,
-    stages: Vec<Vec<Block1D>>,
-    norm: Option<ConvRmsNorm>,
-    head: SConv1d,
+    stem: EncoderStem,
+    conv_layers: Vec<EncoderConvLayer>,
+    head: EncoderHead,
     hop_length: usize,
 }
 
 impl TokenizerEncoder {
     pub fn load_acoustic(cfg: &VibeVoiceAcousticTokenizerConfig, vb: VarBuilder) -> Result<Self> {
-        Self::load_common(
+        Self::load_hf_encoder_layout(
             cfg.channels,
             cfg.encoder_n_filters,
             &cfg.encoder_ratios,
-            parse_depths(&cfg.encoder_depths),
             cfg.vae_dim,
             cfg.causal,
             cfg.conv_bias,
-            cfg.disable_last_norm,
-            cfg.mixer_layer == "depthwise_conv",
             vb,
         )
     }
 
     pub fn load_semantic(cfg: &VibeVoiceSemanticTokenizerConfig, vb: VarBuilder) -> Result<Self> {
-        Self::load_common(
+        Self::load_hf_encoder_layout(
             cfg.channels,
             cfg.encoder_n_filters,
             &cfg.encoder_ratios,
-            parse_depths(&cfg.encoder_depths),
             cfg.vae_dim,
             cfg.causal,
             cfg.conv_bias,
-            cfg.disable_last_norm,
-            cfg.mixer_layer == "depthwise_conv",
             vb,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn load_common(
+    pub fn load_hf_encoder_layout(
         channels: usize,
         filters: usize,
         ratios: &[usize],
-        depths: Vec<usize>,
         vae_dim: usize,
         causal: bool,
         bias: bool,
-        disable_last_norm: bool,
-        depthwise: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
+        let stage_depths = [3usize, 3, 3, 3, 3, 3, 8];
         let ratios_rev: Vec<usize> = ratios.iter().copied().rev().collect();
-        let mut downsample_layers = Vec::with_capacity(ratios_rev.len() + 1);
-        downsample_layers.push(vec![SConv1d::new(
-            channels,
-            filters,
-            7,
-            1,
-            1,
-            1,
-            bias,
-            causal,
-            vb.pp("downsample_layers").pp(0).pp(0),
-        )?]);
-        for (i, ratio) in ratios_rev.iter().copied().enumerate() {
-            let in_ch = filters * (1usize << i);
-            let out_ch = filters * (1usize << (i + 1));
-            downsample_layers.push(vec![SConv1d::new(
-                in_ch,
-                out_ch,
-                ratio * 2,
-                ratio,
+
+        let stem = EncoderStem {
+            conv: SConv1d::new(
+                channels,
+                filters,
+                7,
+                1,
                 1,
                 1,
                 bias,
                 causal,
-                vb.pp("downsample_layers").pp(i + 1).pp(0),
-            )?]);
-        }
+                vb.pp("stem").pp("conv").pp("conv"),
+            )?,
+            stage: load_stage(
+                filters,
+                stage_depths[0],
+                causal,
+                bias,
+                true,
+                vb.pp("stem").pp("stage"),
+            )?,
+        };
 
-        let mut stages = Vec::with_capacity(depths.len());
-        for (i, depth) in depths.iter().copied().enumerate() {
-            let dim = filters * (1usize << i);
-            let mut stage = Vec::with_capacity(depth);
-            for j in 0..depth {
-                stage.push(Block1D::new(
-                    dim,
-                    7,
+        let mut conv_layers = Vec::with_capacity(ratios_rev.len());
+        for (idx, ratio) in ratios_rev.iter().copied().enumerate() {
+            let in_ch = filters * (1usize << idx);
+            let out_ch = filters * (1usize << (idx + 1));
+            conv_layers.push(EncoderConvLayer {
+                conv: SConv1d::new(
+                    in_ch,
+                    out_ch,
+                    ratio * 2,
+                    ratio,
+                    1,
+                    1,
+                    bias,
+                    causal,
+                    vb.pp("conv_layers").pp(idx).pp("conv").pp("conv"),
+                )?,
+                stage: load_stage(
+                    out_ch,
+                    stage_depths[idx + 1],
                     causal,
                     bias,
-                    depthwise,
-                    vb.pp("stages").pp(i).pp(j),
-                )?);
-            }
-            stages.push(stage);
+                    true,
+                    vb.pp("conv_layers").pp(idx).pp("stage"),
+                )?,
+            });
         }
-        let final_dim = filters * (1usize << (depths.len() - 1));
-        let norm = if disable_last_norm {
-            None
-        } else {
-            Some(ConvRmsNorm::new(final_dim, 1e-5, vb.pp("norm"))?)
+
+        let head = EncoderHead {
+            conv: SConv1d::new(
+                filters * (1usize << ratios.len()),
+                vae_dim,
+                7,
+                1,
+                1,
+                1,
+                bias,
+                causal,
+                vb.pp("head").pp("conv"),
+            )?,
         };
-        let head = SConv1d::new(final_dim, vae_dim, 7, 1, 1, 1, bias, causal, vb.pp("head"))?;
-        let hop_length = ratios.iter().product();
+
         Ok(Self {
-            downsample_layers,
-            stages,
-            norm,
+            stem,
+            conv_layers,
             head,
-            hop_length,
+            hop_length: ratios.iter().product(),
         })
     }
 
@@ -499,24 +517,44 @@ impl TokenizerEncoder {
                 "expected [batch, channels, time], got {shape:?}"
             )));
         }
-        let mut xs = waveform.clone();
-        for i in 0..self.stages.len() {
-            for layer in &self.downsample_layers[i] {
-                xs = layer.forward(&xs)?;
-            }
-            for block in &self.stages[i] {
+        let mut xs = self.stem.conv.forward(waveform)?;
+        for block in &self.stem.stage {
+            xs = block.forward(&xs)?;
+        }
+        for layer in &self.conv_layers {
+            xs = layer.conv.forward(&xs)?;
+            for block in &layer.stage {
                 xs = block.forward(&xs)?;
             }
         }
-        if let Some(norm) = &self.norm {
-            xs = norm.forward(&xs)?;
-        }
-        let mean = self.head.forward(&xs)?.transpose(1, 2)?;
+        let mean = self.head.conv.forward(&xs)?.transpose(1, 2)?;
         Ok(TokenizerEncoderOutput {
             mean,
             fixed_std: None,
         })
     }
+}
+
+fn load_stage(
+    dim: usize,
+    depth: usize,
+    causal: bool,
+    bias: bool,
+    depthwise: bool,
+    vb: VarBuilder,
+) -> Result<Vec<Block1D>> {
+    let mut stage = Vec::with_capacity(depth);
+    for idx in 0..depth {
+        stage.push(Block1D::new(
+            dim,
+            7,
+            causal,
+            bias,
+            depthwise,
+            vb.pp(idx),
+        )?);
+    }
+    Ok(stage)
 }
 
 #[derive(Debug)]
@@ -672,6 +710,28 @@ impl VibeVoiceAcousticTokenizerModel {
         })
     }
 
+    pub fn load_hf_encoder(cfg: &VibeVoiceAcousticTokenizerConfig, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            encoder: TokenizerEncoder::load_hf_encoder_layout(
+                cfg.channels,
+                cfg.encoder_n_filters,
+                &cfg.encoder_ratios,
+                cfg.vae_dim,
+                cfg.causal,
+                cfg.conv_bias,
+                vb,
+            )?,
+            decoder: TokenizerDecoder {
+                upsample_layers: Vec::new(),
+                stages: Vec::new(),
+                norm: None,
+                head: None,
+                loaded: false,
+            },
+            std_dist_type: cfg.std_dist_type.clone(),
+        })
+    }
+
     pub fn encode(&self, waveform: &Tensor) -> Result<TokenizerEncoderOutput> {
         let mut out = self.encoder.forward(waveform)?;
         if self.std_dist_type == "gaussian" {
@@ -698,6 +758,20 @@ impl VibeVoiceSemanticTokenizerModel {
     pub fn load(cfg: &VibeVoiceSemanticTokenizerConfig, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
             encoder: TokenizerEncoder::load_semantic(cfg, vb.pp("encoder"))?,
+        })
+    }
+
+    pub fn load_hf_encoder(cfg: &VibeVoiceSemanticTokenizerConfig, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            encoder: TokenizerEncoder::load_hf_encoder_layout(
+                cfg.channels,
+                cfg.encoder_n_filters,
+                &cfg.encoder_ratios,
+                cfg.vae_dim,
+                cfg.causal,
+                cfg.conv_bias,
+                vb,
+            )?,
         })
     }
 

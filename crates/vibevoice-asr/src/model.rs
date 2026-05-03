@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::{Linear, Module, VarBuilder, linear};
 use hf_hub::{Repo, RepoType, api::sync::Api};
 use serde::Deserialize;
@@ -18,7 +18,7 @@ use crate::{
     qwen2::{self, RmsNorm},
 };
 
-pub const DEFAULT_MODEL_REPO: &str = "microsoft/VibeVoice-ASR";
+pub const DEFAULT_MODEL_REPO: &str = "microsoft/VibeVoice-ASR-HF";
 
 #[derive(Debug)]
 pub struct SpeechConnector {
@@ -40,6 +40,22 @@ impl SpeechConnector {
         let xs = self.fc1.forward(features)?;
         let xs = self.norm.forward(&xs)?;
         Ok(self.fc2.forward(&xs)?)
+    }
+
+    pub fn load_hf(vb: VarBuilder, modality: &str, input_dim: usize, output_dim: usize) -> Result<Self> {
+        let (linear1, norm, linear2) = match modality {
+            "acoustic" => ("acoustic_linear_1", "acoustic_norm", "acoustic_linear_2"),
+            "semantic" => ("semantic_linear_1", "semantic_norm", "semantic_linear_2"),
+            other => {
+                return Err(VibeVoiceAsrError::InvalidInput(format!(
+                    "unsupported multimodal projector branch `{other}`"
+                )))
+            }
+        };
+        let fc1 = linear(input_dim, output_dim, vb.pp(linear1))?;
+        let norm = RmsNorm::new(output_dim, 1e-6, vb.pp(norm))?;
+        let fc2 = linear(output_dim, output_dim, vb.pp(linear2))?;
+        Ok(Self { fc1, norm, fc2 })
     }
 }
 
@@ -77,45 +93,40 @@ impl VibeVoiceAsrModel {
             .or(config.decoder_config.torch_dtype)
             .unwrap_or(DTypeName::F32)
             .into_candle();
+        let load_dtype = match device {
+            Device::Cpu => DType::F32,
+            _ => dtype,
+        };
 
         let weight_files = find_weight_files(model_dir)?;
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_files, dtype, &device)? };
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weight_files, load_dtype, &device)? };
 
-        let acoustic_root = pick_prefix(&vb, &["model.acoustic_tokenizer", "acoustic_tokenizer"])?;
-        let semantic_root = pick_prefix(&vb, &["model.semantic_tokenizer", "semantic_tokenizer"])?;
-        let acoustic_connector_root = pick_prefix(
-            &vb,
-            &["model.acoustic_connector", "acoustic_connector"],
-        )?;
-        let semantic_connector_root = pick_prefix(
-            &vb,
-            &["model.semantic_connector", "semantic_connector"],
-        )?;
-        let language_model_root = pick_prefix(
-            &vb,
-            &["model.language_model", "language_model"],
-        )?;
-
-        let acoustic_tokenizer = VibeVoiceAcousticTokenizerModel::load(
+        let acoustic_tokenizer = VibeVoiceAcousticTokenizerModel::load_hf_encoder(
             &config.acoustic_tokenizer_config,
-            vb.pp(acoustic_root),
+            vb.pp("acoustic_tokenizer_encoder"),
         )?;
-        let semantic_tokenizer = VibeVoiceSemanticTokenizerModel::load(
+        let semantic_tokenizer = VibeVoiceSemanticTokenizerModel::load_hf_encoder(
             &config.semantic_tokenizer_config,
-            vb.pp(semantic_root),
+            vb.pp("semantic_tokenizer_encoder"),
         )?;
-        let acoustic_connector = SpeechConnector::load(
+        let acoustic_connector = SpeechConnector::load_hf(
+            vb.pp("multi_modal_projector"),
+            "acoustic",
             config.acoustic_vae_dim(),
             config.decoder_config.hidden_size,
-            vb.pp(acoustic_connector_root),
         )?;
-        let semantic_connector = SpeechConnector::load(
+        let semantic_connector = SpeechConnector::load_hf(
+            vb.pp("multi_modal_projector"),
+            "semantic",
             config.semantic_vae_dim(),
             config.decoder_config.hidden_size,
-            vb.pp(semantic_connector_root),
         )?;
         let decoder_cfg = to_candle_qwen2_config(&config.decoder_config)?;
-        let decoder = qwen2::ModelForCausalLM::new(&decoder_cfg, vb.pp(language_model_root))?;
+        let decoder = qwen2::ModelForCausalLM::new(
+            &decoder_cfg,
+            vb.pp("language_model.model"),
+            Some(vb.pp("language_model.lm_head")),
+        )?;
         let eos_token_id = tokenizer
             .token_to_id("<|endoftext|>")
             .or_else(|| tokenizer.get_vocab(true).get("<|endoftext|>").copied());
@@ -159,6 +170,13 @@ impl VibeVoiceAsrModel {
 
         let semantic_latents = self.semantic_tokenizer.encode(speech_tensor)?.sample();
         let semantic_features = self.semantic_connector.forward(&semantic_latents)?;
+        let acoustic_shape = acoustic_features.dims3()?;
+        let semantic_shape = semantic_features.dims3()?;
+        if acoustic_shape != semantic_shape {
+            return Err(VibeVoiceAsrError::InvalidInput(format!(
+                "acoustic and semantic feature shapes differ: acoustic={acoustic_shape:?}, semantic={semantic_shape:?}"
+            )));
+        }
         let combined_features = (&acoustic_features + &semantic_features)?;
 
         Ok(VibeVoiceAsrSession {
@@ -321,44 +339,20 @@ fn apply_speech_features(
         .to_dtype(DTypeName::F32.into_candle())?
         .flatten_all()?
         .to_vec1::<f32>()?;
+    if true_positions.len() != speech_len {
+        return Err(VibeVoiceAsrError::InvalidInput(format!(
+            "audio placeholder count {} does not match encoded speech feature length {}; prompt/tokenizer ratio mismatch",
+            true_positions.len(),
+            speech_len
+        )));
+    }
     for (dst_idx, seq_idx) in true_positions.into_iter().enumerate() {
-        if dst_idx >= speech_len {
-            break;
-        }
         let dst_offset = seq_idx * hidden;
         let src_offset = dst_idx * hidden;
         flat[dst_offset..dst_offset + hidden]
             .copy_from_slice(&speech_values[src_offset..src_offset + hidden]);
     }
     Ok(Tensor::from_vec(flat, (batch, seq_len, hidden), token_embeddings.device())?.to_dtype(dtype)?)
-}
-
-fn pick_prefix(vb: &VarBuilder, candidates: &[&str]) -> Result<String> {
-    for prefix in candidates {
-        let probe = format!("{prefix}.fc1.weight");
-        if vb.contains_tensor(&probe) {
-            return Ok((*prefix).to_string());
-        }
-        let probe = format!("{prefix}.encoder.head.conv.conv.weight");
-        if vb.contains_tensor(&probe) {
-            return Ok((*prefix).to_string());
-        }
-        let probe = format!("{prefix}.encoder.downsample_layers.0.0.conv.conv.weight");
-        if vb.contains_tensor(&probe) {
-            return Ok((*prefix).to_string());
-        }
-        let probe = format!("{prefix}.model.embed_tokens.weight");
-        if vb.contains_tensor(&probe) {
-            return Ok((*prefix).to_string());
-        }
-        let probe = format!("{prefix}.embed_tokens.weight");
-        if vb.contains_tensor(&probe) {
-            return Ok((*prefix).to_string());
-        }
-    }
-    Err(VibeVoiceAsrError::InvalidInput(format!(
-        "could not resolve weight prefix from candidates: {candidates:?}"
-    )))
 }
 
 fn find_weight_files(dir: &Path) -> Result<Vec<PathBuf>> {

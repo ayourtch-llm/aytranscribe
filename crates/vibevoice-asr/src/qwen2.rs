@@ -386,9 +386,11 @@ pub struct ModelForCausalLM {
 }
 
 impl ModelForCausalLM {
-    pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &Config, vb: VarBuilder, lm_head_vb: Option<VarBuilder>) -> Result<Self> {
         let base_model = Model::new(cfg, vb.clone())?;
-        let lm_head = if vb.contains_tensor("lm_head.weight") {
+        let lm_head = if let Some(lm_head_vb) = lm_head_vb {
+            linear_no_bias(cfg.hidden_size, cfg.vocab_size, lm_head_vb)?
+        } else if vb.contains_tensor("lm_head.weight") {
             linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?
         } else if vb.contains_tensor("language_model.lm_head.weight") {
             linear_no_bias(cfg.hidden_size, cfg.vocab_size, vb.pp("language_model.lm_head"))?
@@ -468,7 +470,7 @@ mod tests {
         let vm = VarMap::new();
         let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
         let cfg = tiny_config();
-        let mut model = ModelForCausalLM::new(&cfg, vb).unwrap();
+        let mut model = ModelForCausalLM::new(&cfg, vb, None).unwrap();
         let input_embeds = Tensor::zeros((1, 3, cfg.hidden_size), DType::F32, &Device::Cpu).unwrap();
         let logits = model.forward_embeds(&input_embeds, 0, None).unwrap();
         assert_eq!(logits.dims3().unwrap(), (1, 1, cfg.vocab_size));

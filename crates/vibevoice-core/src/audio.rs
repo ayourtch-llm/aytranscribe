@@ -155,14 +155,15 @@ fn resample_to_24khz(input: &[f32], input_sample_rate: u32) -> Result<Vec<f32>> 
     if input.is_empty() {
         return Ok(Vec::new());
     }
-    let chunk = 1024usize;
+    let probe_chunk = 1024usize;
     let mut resampler = FftFixedInOut::<f32>::new(
         input_sample_rate as usize,
         TARGET_SAMPLE_RATE as usize,
-        chunk,
+        probe_chunk,
         1,
     )
     .map_err(|e| VibeVoiceCoreError::AudioDecode(e.to_string()))?;
+    let chunk = resampler.input_frames_next();
 
     let mut padded = input.to_vec();
     let rem = padded.len() % chunk;

@@ -17,7 +17,7 @@ struct Cli {
     #[arg(long)]
     context: Option<String>,
 
-    #[arg(long, default_value = "cpu")]
+    #[arg(long, default_value = "auto")]
     device: String,
 
     #[arg(long)]
@@ -53,17 +53,21 @@ fn run(cli: Cli) -> Result<()> {
 
     let output = model.transcribe_inputs(&inputs, cli.max_new_tokens)?;
     fs::write(&cli.output, &output)?;
+    println!("{output}");
     Ok(())
 }
 
 fn parse_device(spec: &str) -> Result<DeviceSpec> {
+    if spec.eq_ignore_ascii_case("auto") {
+        return Ok(DeviceSpec::Auto);
+    }
     if spec.eq_ignore_ascii_case("cpu") {
         return Ok(DeviceSpec::Cpu);
     }
     if let Some(rest) = spec.strip_prefix("cuda:") {
         return Ok(DeviceSpec::Cuda(rest.parse()?));
     }
-    anyhow::bail!("unsupported device spec `{spec}`, use `cpu` or `cuda:N`")
+    anyhow::bail!("unsupported device spec `{spec}`, use `auto`, `cpu` or `cuda:N`")
 }
 
 #[cfg(test)]
@@ -80,7 +84,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(cli.max_new_tokens, 128);
-        assert_eq!(cli.device, "cpu");
+        assert_eq!(cli.device, "auto");
     }
 
     #[test]

@@ -14,5 +14,4 @@ symphonia.workspace = true
 thiserror.workspace = true
 
 [features]
-cuda = []
-
+cuda = ["candle-core/cuda"]

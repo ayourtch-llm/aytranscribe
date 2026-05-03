@@ -4,6 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+cuda = [
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+    "vibevoice-core/cuda",
+    "vibevoice-tokenizer/cuda",
+]
+
 [dependencies]
 candle-core.workspace = true
 candle-nn.workspace = true
@@ -11,4 +20,3 @@ candle-transformers.workspace = true
 thiserror.workspace = true
 vibevoice-core = { path = "../vibevoice-core" }
 vibevoice-tokenizer = { path = "../vibevoice-tokenizer" }
-
