@@ -837,6 +837,7 @@ mod tests {
     use candle_nn::VarMap;
 
     #[test]
+    #[ignore] // slow: builds full encoder with random weights (~60s)
     fn encoder_constructs_from_config() {
         let vm = VarMap::new();
         let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
@@ -849,6 +850,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // slow: full encoder forward pass (~180s)
     fn encoder_forward_has_expected_shape() {
         let vm = VarMap::new();
         let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
@@ -865,6 +867,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // slow: full decoder forward pass (~120s)
     fn decoder_forward_has_expected_channels() {
         let vm = VarMap::new();
         let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
@@ -926,6 +929,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // slow: block1d with full convolutions (~60s)
     fn block1d_forward_preserves_shape() {
         let vm = VarMap::new();
         let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
@@ -936,6 +940,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // slow: block1d with full convolutions (~60s)
     fn block1d_forward_handles_short_sequences() {
         let vm = VarMap::new();
         let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
