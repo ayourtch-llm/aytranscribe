@@ -119,10 +119,11 @@ impl VibeVoiceAsrModel {
                 Tensor::from_vec(chunk_samples.to_vec(), (1, 1, chunk_samples.len()), device)?;
             let inputs =
                 processor.prepare_audio_tensor(speech_tensor, chunk_samples.len(), options.context_info)?;
+            let chunk_duration_secs = chunk_samples.len() as f64 / audio.sample_rate as f64;
             let chunk_json =
                 self.transcribe_inputs_with_progress(&inputs, options.max_new_tokens, progress)?;
             let chunk_segments =
-                parse_transcription_segments(&chunk_json, start_time_secs)?;
+                parse_transcription_segments(&chunk_json, start_time_secs, chunk_duration_secs)?;
             let appended = merge_transcription_segments(&mut merged, chunk_segments);
             if let Some(progress) = progress {
                 let partial_json = serde_json::to_string(&appended)?;
@@ -187,6 +188,7 @@ pub fn split_audio_into_chunks(
 pub fn parse_transcription_segments(
     json: &str,
     start_time_offset_secs: f64,
+    chunk_duration_secs: f64,
 ) -> Result<Vec<TranscriptionSegment>> {
     let trimmed = json.trim();
     if trimmed.is_empty() {
@@ -199,6 +201,7 @@ pub fn parse_transcription_segments(
     })?;
     Ok(segments
         .into_iter()
+        .take_while(|seg| seg.start < chunk_duration_secs)
         .map(|segment| segment.with_offset(start_time_offset_secs))
         .collect())
 }
@@ -269,6 +272,7 @@ mod tests {
         let parsed = parse_transcription_segments(
             r#"[{"Start":1.0,"End":2.5,"Speaker":0,"Content":"hello"}]"#,
             120.0,
+            60.0,
         )
         .unwrap();
         assert_eq!(parsed[0].start, 121.0);

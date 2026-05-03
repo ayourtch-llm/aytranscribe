@@ -261,9 +261,14 @@ impl VibeVoiceAsrModel {
             progress.on_generation_progress(generated.len(), estimated_total);
         }
 
-        self.decoder_tokenizer
+        let mut text = self
+            .decoder_tokenizer
             .decode(&generated, true)
-            .map_err(VibeVoiceAsrError::Tokenizer)
+            .map_err(VibeVoiceAsrError::Tokenizer)?;
+        if let Some(pos) = text.rfind(']') {
+            text.truncate(pos + 1);
+        }
+        Ok(text)
     }
 
     pub fn transcribe(
@@ -419,6 +424,7 @@ fn find_weight_files(dir: &Path) -> Result<Vec<PathBuf>> {
 struct SafeTensorIndex {
     weight_map: HashMap<String, String>,
 }
+
 
 #[cfg(test)]
 mod tests {
