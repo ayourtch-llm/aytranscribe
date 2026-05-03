@@ -12,6 +12,13 @@ cuda = [
     "vibevoice-core/cuda",
     "vibevoice-tokenizer/cuda",
 ]
+metal = [
+    "candle-core/metal",
+    "candle-nn/metal",
+    "candle-transformers/metal",
+    "vibevoice-core/metal",
+    "vibevoice-tokenizer/metal",
+]
 
 [dependencies]
 candle-core.workspace = true

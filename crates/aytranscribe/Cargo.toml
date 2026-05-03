@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 cuda = ["vibevoice-asr/cuda", "vibevoice-core/cuda"]
+metal = ["vibevoice-asr/metal", "vibevoice-core/metal"]
 
 [dependencies]
 anyhow.workspace = true

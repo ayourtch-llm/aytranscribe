@@ -94,9 +94,13 @@ impl VibeVoiceAsrModel {
             .or(config.decoder_config.torch_dtype)
             .unwrap_or(DTypeName::F32)
             .into_candle();
-        let load_dtype = match device {
-            Device::Cpu => DType::F32,
-            _ => dtype,
+        let load_dtype = if device.is_cuda() {
+            match dtype {
+                DType::BF16 | DType::F16 => dtype,
+                _ => DType::BF16,
+            }
+        } else {
+            DType::F32
         };
 
         let weight_files = find_weight_files(model_dir)?;
