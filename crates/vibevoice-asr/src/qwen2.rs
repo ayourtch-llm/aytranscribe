@@ -404,6 +404,10 @@ impl ModelForCausalLM {
         self.base_model.embed(input_ids)
     }
 
+    pub fn base_model(&mut self) -> &mut Model {
+        &mut self.base_model
+    }
+
     pub fn forward(&mut self, input_ids: &Tensor, seqlen_offset: usize) -> Result<Tensor> {
         let (_b_size, seq_len) = input_ids.dims2()?;
         self.base_model
