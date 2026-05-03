@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File},
     io::{Seek, SeekFrom, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Mutex,
     time::Instant,
 };
@@ -172,7 +172,12 @@ impl TranscriptionProgress for CliProgress {
             self.record_error(err);
         }
         if !partial_result.trim().is_empty() && partial_result.trim() != "[]" {
-            println!("Chunk {chunk_index} complete.");
+            let chunk_path = chunk_backup_path(&self.output_path, chunk_index);
+            if let Err(err) = fs::write(&chunk_path, partial_result) {
+                self.record_error(err);
+            } else {
+                println!("Chunk {chunk_index} complete → {}", chunk_path.display());
+            }
         }
     }
 
@@ -235,6 +240,19 @@ impl JsonStreamWriter {
         }
         Ok(())
     }
+}
+
+fn chunk_backup_path(output_path: &PathBuf, chunk_index: usize) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "output".to_string());
+    let ext = output_path
+        .extension()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "json".to_string());
+    let parent = output_path.parent().unwrap_or(Path::new("."));
+    parent.join(format!("{stem}.chunk_{chunk_index:03}.{ext}"))
 }
 
 fn format_clock(seconds: f64) -> String {

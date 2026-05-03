@@ -6,7 +6,7 @@ use crate::{
     Result, VibeVoiceAsrError, VibeVoiceAsrModel, VibeVoiceAsrProcessor,
 };
 
-pub const DEFAULT_MAX_CHUNK_DURATION_SECS: f64 = 45.0 * 60.0;
+pub const DEFAULT_MAX_CHUNK_DURATION_SECS: f64 = 15.0 * 60.0;
 pub const DEFAULT_CHUNK_OVERLAP_SECS: f64 = 30.0;
 
 pub trait TranscriptionProgress: Send + Sync {
