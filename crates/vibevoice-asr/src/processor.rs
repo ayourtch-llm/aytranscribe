@@ -27,9 +27,11 @@ pub struct VibeVoiceAsrInputs {
 
 impl VibeVoiceAsrProcessor {
     pub fn new(tokenizer: Tokenizer, speech_tok_compress_ratio: usize) -> Result<Self> {
-        let speech_start_id = token_id(&tokenizer, "<|speech_start|>")?;
-        let speech_pad_id = token_id(&tokenizer, "<|speech_pad|>")?;
-        let speech_end_id = token_id(&tokenizer, "<|speech_end|>")?;
+        let speech_start_id =
+            token_id_any(&tokenizer, &["<|speech_start|>", "<|object_ref_start|>"])?;
+        let speech_pad_id = token_id_any(&tokenizer, &["<|speech_pad|>", "<|box_start|>"])?;
+        let speech_end_id =
+            token_id_any(&tokenizer, &["<|speech_end|>", "<|object_ref_end|>"])?;
         Ok(Self {
             tokenizer,
             speech_tok_compress_ratio,
@@ -86,7 +88,10 @@ impl VibeVoiceAsrProcessor {
         audio_duration_secs: f32,
         context_info: Option<&str>,
     ) -> Result<(Vec<u32>, Vec<bool>)> {
-        let mut ids = self.tokenizer.encode(SYSTEM_PROMPT, true)?.get_ids().to_vec();
+        let system_prefix = format!(
+            "<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n<|im_start|>user\n"
+        );
+        let mut ids = self.tokenizer.encode(system_prefix, true)?.get_ids().to_vec();
         let mut mask = vec![false; ids.len()];
 
         ids.push(self.speech_start_id);
@@ -96,7 +101,10 @@ impl VibeVoiceAsrProcessor {
         ids.push(self.speech_end_id);
         mask.push(false);
 
-        let suffix = build_user_suffix(audio_duration_secs, context_info);
+        let suffix = format!(
+            "{}<|im_end|>\n<|im_start|>assistant\n",
+            build_user_suffix(audio_duration_secs, context_info)
+        );
         let suffix_ids = self.tokenizer.encode(suffix, true)?.get_ids().to_vec();
         mask.extend(std::iter::repeat_n(false, suffix_ids.len()));
         ids.extend(suffix_ids);
@@ -112,11 +120,19 @@ impl VibeVoiceAsrProcessor {
     }
 }
 
-fn token_id(tokenizer: &Tokenizer, token: &str) -> Result<u32> {
-    tokenizer
-        .token_to_id(token)
-        .or_else(|| tokenizer.get_vocab(true).get(token).copied())
-        .ok_or_else(|| VibeVoiceAsrError::InvalidInput(format!("missing tokenizer token `{token}`")))
+fn token_id_any(tokenizer: &Tokenizer, tokens: &[&str]) -> Result<u32> {
+    for token in tokens {
+        if let Some(id) = tokenizer
+            .token_to_id(token)
+            .or_else(|| tokenizer.get_vocab(true).get(*token).copied())
+        {
+            return Ok(id);
+        }
+    }
+    Err(VibeVoiceAsrError::InvalidInput(format!(
+        "missing tokenizer tokens {:?}",
+        tokens
+    )))
 }
 
 fn build_user_suffix(audio_duration_secs: f32, context_info: Option<&str>) -> String {
@@ -184,6 +200,11 @@ mod tests {
             ("<|speech_start|>", 35),
             ("<|speech_pad|>", 36),
             ("<|speech_end|>", 37),
+            ("<|im_start|>", 38),
+            ("<|im_end|>", 39),
+            ("system", 40),
+            ("user", 41),
+            ("assistant\n", 42),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
@@ -199,6 +220,8 @@ mod tests {
             AddedToken::from("<|speech_start|>", true),
             AddedToken::from("<|speech_pad|>", true),
             AddedToken::from("<|speech_end|>", true),
+            AddedToken::from("<|im_start|>", true),
+            AddedToken::from("<|im_end|>", true),
         ]);
         tokenizer
     }

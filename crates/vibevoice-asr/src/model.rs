@@ -14,9 +14,11 @@ use vibevoice_tokenizer::{VibeVoiceAcousticTokenizerModel, VibeVoiceSemanticToke
 
 use crate::{
     error::{Result, VibeVoiceAsrError},
-    processor::VibeVoiceAsrInputs,
+    processor::{VibeVoiceAsrInputs, VibeVoiceAsrProcessor},
     qwen2::{self, RmsNorm},
 };
+
+pub const DEFAULT_MODEL_REPO: &str = "microsoft/VibeVoice-ASR";
 
 #[derive(Debug)]
 pub struct SpeechConnector {
@@ -131,7 +133,8 @@ impl VibeVoiceAsrModel {
         })
     }
 
-    pub fn from_hf_hub(repo_id: &str, device: Device) -> Result<Self> {
+    pub fn from_hf_hub(repo_id: Option<&str>, device: Device) -> Result<Self> {
+        let repo_id = repo_id.unwrap_or(DEFAULT_MODEL_REPO);
         let api = Api::new()?;
         let repo = api.repo(Repo::new(repo_id.to_string(), RepoType::Model));
         let config_path = repo.get("config.json")?;
@@ -152,14 +155,10 @@ impl VibeVoiceAsrModel {
 
     pub fn encode_speech(&self, speech_tensor: &Tensor) -> Result<VibeVoiceAsrSession> {
         let acoustic_latents = self.acoustic_tokenizer.encode(speech_tensor)?.sample();
-        let acoustic_features = self
-            .acoustic_connector
-            .forward(&transpose_bct_to_btc(&acoustic_latents)?)?;
+        let acoustic_features = self.acoustic_connector.forward(&acoustic_latents)?;
 
         let semantic_latents = self.semantic_tokenizer.encode(speech_tensor)?.sample();
-        let semantic_features = self
-            .semantic_connector
-            .forward(&transpose_bct_to_btc(&semantic_latents)?)?;
+        let semantic_features = self.semantic_connector.forward(&semantic_latents)?;
         let combined_features = (&acoustic_features + &semantic_features)?;
 
         Ok(VibeVoiceAsrSession {
@@ -167,6 +166,13 @@ impl VibeVoiceAsrModel {
             semantic_features,
             combined_features,
         })
+    }
+
+    pub fn processor_from_tokenizer(&self) -> Result<VibeVoiceAsrProcessor> {
+        VibeVoiceAsrProcessor::new(
+            self.decoder_tokenizer.clone(),
+            self.config.encoder_ratios_product()?,
+        )
     }
 
     pub fn transcribe_inputs(
@@ -268,10 +274,6 @@ pub fn to_candle_qwen2_config(cfg: &Qwen2DecoderConfig) -> Result<qwen2::Config>
     })
 }
 
-fn transpose_bct_to_btc(xs: &Tensor) -> Result<Tensor> {
-    Ok(xs.transpose(1, 2)?)
-}
-
 fn logits_argmax(logits: &Tensor) -> Result<u32> {
     let squeezed = logits.squeeze(0)?.squeeze(0)?;
     Ok(squeezed.argmax(0)?.to_scalar::<u32>()?)
@@ -337,11 +339,19 @@ fn pick_prefix(vb: &VarBuilder, candidates: &[&str]) -> Result<String> {
         if vb.contains_tensor(&probe) {
             return Ok((*prefix).to_string());
         }
-        let probe = format!("{prefix}.encoder.head.weight");
+        let probe = format!("{prefix}.encoder.head.conv.conv.weight");
+        if vb.contains_tensor(&probe) {
+            return Ok((*prefix).to_string());
+        }
+        let probe = format!("{prefix}.encoder.downsample_layers.0.0.conv.conv.weight");
         if vb.contains_tensor(&probe) {
             return Ok((*prefix).to_string());
         }
         let probe = format!("{prefix}.model.embed_tokens.weight");
+        if vb.contains_tensor(&probe) {
+            return Ok((*prefix).to_string());
+        }
+        let probe = format!("{prefix}.embed_tokens.weight");
         if vb.contains_tensor(&probe) {
             return Ok((*prefix).to_string());
         }

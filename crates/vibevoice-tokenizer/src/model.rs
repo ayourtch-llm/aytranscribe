@@ -1,5 +1,8 @@
-use candle_core::{Shape, Tensor};
-use candle_nn::{Conv1d, Conv1dConfig, Module, VarBuilder, conv1d};
+use candle_core::{DType, Shape, Tensor};
+use candle_nn::{
+    Activation, Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Linear, Module,
+    VarBuilder, conv1d, conv_transpose1d, linear,
+};
 
 use crate::error::{Result, VibeVoiceTokenizerError};
 use vibevoice_core::{VibeVoiceAcousticTokenizerConfig, VibeVoiceSemanticTokenizerConfig};
@@ -35,7 +38,8 @@ impl RmsNorm {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let denom = ((xs.sqr()?.sum_keepdim(candle_core::D::Minus1)? / xs.dim(candle_core::D::Minus1)? as f64)?
+        let denom = ((xs.sqr()?.sum_keepdim(candle_core::D::Minus1)?
+            / xs.dim(candle_core::D::Minus1)? as f64)?
             + self.eps)?
             .sqrt()?;
         let ys = xs.broadcast_div(&denom)?;
@@ -68,9 +72,14 @@ pub fn get_extra_padding_for_conv1d(
     stride: usize,
     padding_total: usize,
 ) -> usize {
-    let n_frames = (input_len.saturating_sub(kernel_size) + padding_total) as f64 / stride as f64 + 1.0;
-    let ideal_length = ((n_frames.ceil() as usize).saturating_sub(1)) * stride + (kernel_size - padding_total);
-    ideal_length.saturating_sub(input_len)
+    let length = input_len as f64;
+    let kernel_size = kernel_size as f64;
+    let stride = stride as f64;
+    let padding_total = padding_total as f64;
+    let n_frames = (length - kernel_size + padding_total) / stride + 1.0;
+    let ideal_length =
+        (n_frames.ceil() - 1.0) * stride + (kernel_size - padding_total);
+    ideal_length.max(length).round() as usize - input_len
 }
 
 pub fn pad1d(xs: &[f32], left: usize, right: usize, value: f32) -> Vec<f32> {
@@ -86,11 +95,290 @@ pub fn unpad1d(xs: &[f32], left: usize, right: usize) -> Vec<f32> {
     xs[left.min(end)..end].to_vec()
 }
 
+#[derive(Debug, Clone)]
+struct NormConv1d {
+    conv: Conv1d,
+}
+
+impl NormConv1d {
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        dilation: usize,
+        groups: usize,
+        bias: bool,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let cfg = Conv1dConfig {
+            padding: 0,
+            stride,
+            dilation,
+            groups,
+            ..Default::default()
+        };
+        let conv = if bias {
+            conv1d(in_channels, out_channels, kernel_size, cfg, vb)?
+        } else {
+            let w = vb.get(
+                (out_channels, in_channels / groups, kernel_size),
+                "weight",
+            )?;
+            Conv1d::new(w, None, cfg)
+        };
+        Ok(Self { conv })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.conv.forward(xs).map_err(Into::into)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SConv1d {
+    conv: NormConv1d,
+    causal: bool,
+    pad_value: f32,
+    kernel_size: usize,
+    stride: usize,
+    dilation: usize,
+    padding_total: usize,
+}
+
+impl SConv1d {
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        dilation: usize,
+        groups: usize,
+        bias: bool,
+        causal: bool,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let conv = NormConv1d::new(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            dilation,
+            groups,
+            bias,
+            vb,
+        )?;
+        let padding_total = (kernel_size - 1) * dilation - (stride - 1);
+        Ok(Self {
+            conv,
+            causal,
+            pad_value: 0.0,
+            kernel_size,
+            stride,
+            dilation,
+            padding_total,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let (_, _, t) = xs.dims3()?;
+        let extra_padding =
+            get_extra_padding_for_conv1d(t, self.kernel_size, self.stride, self.padding_total);
+        let padded = pad_tensor1d(
+            xs,
+            if self.causal {
+                self.padding_total
+            } else {
+                self.padding_total - self.padding_total / 2
+            },
+            if self.causal {
+                extra_padding
+            } else {
+                self.padding_total / 2 + extra_padding
+            },
+            self.pad_value,
+        )?;
+        self.conv.forward(&padded)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NormConvTranspose1d {
+    convtr: ConvTranspose1d,
+}
+
+impl NormConvTranspose1d {
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        bias: bool,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        let cfg = ConvTranspose1dConfig {
+            stride,
+            ..Default::default()
+        };
+        let convtr = if bias {
+            conv_transpose1d(in_channels, out_channels, kernel_size, cfg, vb)?
+        } else {
+            let w = vb.get((in_channels, out_channels, kernel_size), "weight")?;
+            ConvTranspose1d::new(w, None, cfg)
+        };
+        Ok(Self { convtr })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.convtr.forward(xs).map_err(Into::into)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SConvTranspose1d {
+    convtr: NormConvTranspose1d,
+    causal: bool,
+    trim_right_ratio: f64,
+    padding_total: usize,
+}
+
+impl SConvTranspose1d {
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        bias: bool,
+        causal: bool,
+        trim_right_ratio: f64,
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        Ok(Self {
+            convtr: NormConvTranspose1d::new(
+                in_channels,
+                out_channels,
+                kernel_size,
+                stride,
+                bias,
+                vb,
+            )?,
+            causal,
+            trim_right_ratio,
+            padding_total: kernel_size - stride,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let ys = self.convtr.forward(xs)?;
+        let (padding_left, padding_right) = if self.causal {
+            let padding_right = (self.padding_total as f64 * self.trim_right_ratio).ceil() as usize;
+            (self.padding_total - padding_right, padding_right)
+        } else {
+            let padding_right = self.padding_total / 2;
+            (self.padding_total - padding_right, padding_right)
+        };
+        trim_tensor1d(&ys, padding_left, padding_right)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Ffn {
+    linear1: Linear,
+    linear2: Linear,
+}
+
+impl Ffn {
+    fn new(embed_dim: usize, ffn_dim: usize, bias: bool, vb: VarBuilder) -> Result<Self> {
+        let linear1 = linear(embed_dim, ffn_dim, vb.pp("linear1"))?;
+        let linear2 = linear(ffn_dim, embed_dim, vb.pp("linear2"))?;
+        let _ = bias;
+        Ok(Self { linear1, linear2 })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let xs = self.linear1.forward(xs)?;
+        let xs = xs.apply(&Activation::Gelu)?;
+        self.linear2.forward(&xs).map_err(Into::into)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Convlayer {
+    conv: SConv1d,
+}
+
+impl Convlayer {
+    fn new(dim: usize, kernel_size: usize, groups: usize, causal: bool, bias: bool, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            conv: SConv1d::new(
+                dim, dim, kernel_size, 1, 1, groups, bias, causal, vb,
+            )?,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.conv.forward(xs)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Block1D {
+    norm: ConvRmsNorm,
+    ffn_norm: ConvRmsNorm,
+    mixer: Convlayer,
+    ffn: Ffn,
+    gamma: Option<Tensor>,
+    ffn_gamma: Option<Tensor>,
+}
+
+impl Block1D {
+    fn new(dim: usize, kernel_size: usize, causal: bool, bias: bool, depthwise: bool, vb: VarBuilder) -> Result<Self> {
+        let groups = if depthwise { dim } else { 1 };
+        Ok(Self {
+            norm: ConvRmsNorm::new(dim, 1e-5, vb.pp("norm"))?,
+            ffn_norm: ConvRmsNorm::new(dim, 1e-5, vb.pp("ffn_norm"))?,
+            mixer: Convlayer::new(dim, kernel_size, groups, causal, bias, vb.pp("mixer"))?,
+            ffn: Ffn::new(dim, dim * 4, bias, vb.pp("ffn"))?,
+            gamma: if vb.contains_tensor("gamma") {
+                Some(vb.get((dim,), "gamma")?)
+            } else {
+                None
+            },
+            ffn_gamma: if vb.contains_tensor("ffn_gamma") {
+                Some(vb.get((dim,), "ffn_gamma")?)
+            } else {
+                None
+            },
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let residual = xs;
+        let mut ys = self.norm.forward(xs)?;
+        ys = self.mixer.forward(&ys)?;
+        if let Some(gamma) = &self.gamma {
+            ys = ys.broadcast_mul(&gamma.reshape((1, gamma.dim(0)?, 1))?)?;
+        }
+        let xs = (residual + ys)?;
+
+        let residual = &xs;
+        let mut ys = self.ffn_norm.forward(&xs)?;
+        ys = ys.transpose(1, 2)?;
+        ys = self.ffn.forward(&ys)?;
+        ys = ys.transpose(1, 2)?;
+        if let Some(gamma) = &self.ffn_gamma {
+            ys = ys.broadcast_mul(&gamma.reshape((1, gamma.dim(0)?, 1))?)?;
+        }
+        Ok((residual + ys)?)
+    }
+}
+
 #[derive(Debug)]
 pub struct TokenizerEncoder {
-    stem: Conv1d,
-    downsamples: Vec<Conv1d>,
-    head: Conv1d,
+    downsample_layers: Vec<Vec<SConv1d>>,
+    stages: Vec<Vec<Block1D>>,
+    norm: Option<ConvRmsNorm>,
+    head: SConv1d,
     hop_length: usize,
 }
 
@@ -100,7 +388,12 @@ impl TokenizerEncoder {
             cfg.channels,
             cfg.encoder_n_filters,
             &cfg.encoder_ratios,
+            parse_depths(&cfg.encoder_depths),
             cfg.vae_dim,
+            cfg.causal,
+            cfg.conv_bias,
+            cfg.disable_last_norm,
+            cfg.mixer_layer == "depthwise_conv",
             vb,
         )
     }
@@ -110,62 +403,86 @@ impl TokenizerEncoder {
             cfg.channels,
             cfg.encoder_n_filters,
             &cfg.encoder_ratios,
+            parse_depths(&cfg.encoder_depths),
             cfg.vae_dim,
+            cfg.causal,
+            cfg.conv_bias,
+            cfg.disable_last_norm,
+            cfg.mixer_layer == "depthwise_conv",
             vb,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn load_common(
         channels: usize,
         filters: usize,
         ratios: &[usize],
+        depths: Vec<usize>,
         vae_dim: usize,
+        causal: bool,
+        bias: bool,
+        disable_last_norm: bool,
+        depthwise: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let stem = conv1d(
+        let ratios_rev: Vec<usize> = ratios.iter().copied().rev().collect();
+        let mut downsample_layers = Vec::with_capacity(ratios_rev.len() + 1);
+        downsample_layers.push(vec![SConv1d::new(
             channels,
             filters,
             7,
-            Conv1dConfig {
-                padding: 3,
-                ..Default::default()
-            },
-            vb.pp("stem"),
-        )?;
-
-        let mut downsamples = Vec::with_capacity(ratios.len());
-        for (idx, ratio) in ratios.iter().rev().copied().enumerate() {
-            let in_ch = filters * (1usize << idx);
-            let out_ch = filters * (1usize << (idx + 1));
-            let kernel = ratio * 2;
-            let padding = ratio.saturating_sub(1);
-            downsamples.push(conv1d(
+            1,
+            1,
+            1,
+            bias,
+            causal,
+            vb.pp("downsample_layers").pp(0).pp(0),
+        )?]);
+        for (i, ratio) in ratios_rev.iter().copied().enumerate() {
+            let in_ch = filters * (1usize << i);
+            let out_ch = filters * (1usize << (i + 1));
+            downsample_layers.push(vec![SConv1d::new(
                 in_ch,
                 out_ch,
-                kernel,
-                Conv1dConfig {
-                    stride: ratio,
-                    padding,
-                    ..Default::default()
-                },
-                vb.pp(format!("downsamples.{idx}")),
-            )?);
+                ratio * 2,
+                ratio,
+                1,
+                1,
+                bias,
+                causal,
+                vb.pp("downsample_layers").pp(i + 1).pp(0),
+            )?]);
         }
-        let head_in = filters * (1usize << ratios.len());
-        let head = conv1d(
-            head_in,
-            vae_dim,
-            7,
-            Conv1dConfig {
-                padding: 3,
-                ..Default::default()
-            },
-            vb.pp("head"),
-        )?;
+
+        let mut stages = Vec::with_capacity(depths.len());
+        for (i, depth) in depths.iter().copied().enumerate() {
+            let dim = filters * (1usize << i);
+            let mut stage = Vec::with_capacity(depth);
+            for j in 0..depth {
+                stage.push(Block1D::new(
+                    dim,
+                    7,
+                    causal,
+                    bias,
+                    depthwise,
+                    vb.pp("stages").pp(i).pp(j),
+                )?);
+            }
+            stages.push(stage);
+        }
+        let final_dim = filters * (1usize << (depths.len() - 1));
+        let norm = if disable_last_norm {
+            None
+        } else {
+            Some(ConvRmsNorm::new(final_dim, 1e-5, vb.pp("norm"))?)
+        };
+        let head = SConv1d::new(final_dim, vae_dim, 7, 1, 1, 1, bias, causal, vb.pp("head"))?;
         let hop_length = ratios.iter().product();
         Ok(Self {
-            stem,
-            downsamples,
+            downsample_layers,
+            stages,
+            norm,
             head,
             hop_length,
         })
@@ -182,11 +499,19 @@ impl TokenizerEncoder {
                 "expected [batch, channels, time], got {shape:?}"
             )));
         }
-        let mut xs = self.stem.forward(waveform)?;
-        for layer in &self.downsamples {
-            xs = layer.forward(&xs)?;
+        let mut xs = waveform.clone();
+        for i in 0..self.stages.len() {
+            for layer in &self.downsample_layers[i] {
+                xs = layer.forward(&xs)?;
+            }
+            for block in &self.stages[i] {
+                xs = block.forward(&xs)?;
+            }
         }
-        let mean = self.head.forward(&xs)?;
+        if let Some(norm) = &self.norm {
+            xs = norm.forward(&xs)?;
+        }
+        let mean = self.head.forward(&xs)?.transpose(1, 2)?;
         Ok(TokenizerEncoderOutput {
             mean,
             fixed_std: None,
@@ -195,13 +520,126 @@ impl TokenizerEncoder {
 }
 
 #[derive(Debug)]
-pub struct TokenizerDecoder;
+pub struct TokenizerDecoder {
+    upsample_layers: Vec<DecoderLayerOp>,
+    stages: Vec<Vec<Block1D>>,
+    norm: Option<ConvRmsNorm>,
+    head: Option<SConv1d>,
+    loaded: bool,
+}
+
+#[derive(Debug)]
+enum DecoderLayerOp {
+    Conv(SConv1d),
+    ConvTr(SConvTranspose1d),
+}
+
+impl DecoderLayerOp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Conv(layer) => layer.forward(xs),
+            Self::ConvTr(layer) => layer.forward(xs),
+        }
+    }
+}
 
 impl TokenizerDecoder {
-    pub fn decode(&self, _latents: &Tensor) -> Result<Tensor> {
-        Err(VibeVoiceTokenizerError::Unsupported(
-            "tokenizer decoder is not implemented yet",
-        ))
+    pub fn load(cfg: &VibeVoiceAcousticTokenizerConfig, vb: VarBuilder) -> Result<Self> {
+        let encoder_depths = parse_depths(&cfg.encoder_depths);
+        let decoder_depths = cfg
+            .decoder_depths
+            .as_ref()
+            .map(|v| parse_depths(v))
+            .unwrap_or_else(|| encoder_depths.iter().copied().rev().collect());
+        let ratios = cfg
+            .decoder_ratios
+            .clone()
+            .unwrap_or_else(|| cfg.encoder_ratios.clone());
+        let mut upsample_layers = Vec::with_capacity(ratios.len() + 1);
+        upsample_layers.push(DecoderLayerOp::Conv(SConv1d::new(
+            cfg.vae_dim,
+            cfg.decoder_n_filters * (1usize << (decoder_depths.len() - 1)),
+            7,
+            1,
+            1,
+            1,
+            cfg.conv_bias,
+            cfg.causal,
+            vb.pp("upsample_layers").pp(0).pp(0),
+        )?));
+        for i in 0..ratios.len() {
+            let in_ch = cfg.decoder_n_filters * (1usize << (decoder_depths.len() - 1 - i));
+            let out_ch = cfg.decoder_n_filters * (1usize << (decoder_depths.len() - 2 - i));
+            upsample_layers.push(DecoderLayerOp::ConvTr(SConvTranspose1d::new(
+                in_ch,
+                out_ch,
+                ratios[i] * 2,
+                ratios[i],
+                cfg.conv_bias,
+                cfg.causal,
+                1.0,
+                vb.pp("upsample_layers").pp(i + 1).pp(0),
+            )?));
+        }
+
+        let mut stages = Vec::with_capacity(decoder_depths.len());
+        for (i, depth) in decoder_depths.iter().copied().enumerate() {
+            let dim = cfg.decoder_n_filters * (1usize << (decoder_depths.len() - 1 - i));
+            let mut stage = Vec::with_capacity(depth);
+            for j in 0..depth {
+                stage.push(Block1D::new(
+                    dim,
+                    7,
+                    cfg.causal,
+                    cfg.conv_bias,
+                    cfg.mixer_layer == "depthwise_conv",
+                    vb.pp("stages").pp(i).pp(j),
+                )?);
+            }
+            stages.push(stage);
+        }
+        let final_dim = cfg.decoder_n_filters;
+        let norm = if cfg.disable_last_norm {
+            None
+        } else {
+            Some(ConvRmsNorm::new(final_dim, 1e-5, vb.pp("norm"))?)
+        };
+        let head = SConv1d::new(final_dim, cfg.channels, 7, 1, 1, 1, cfg.conv_bias, cfg.causal, vb.pp("head"))?;
+        Ok(Self {
+            upsample_layers,
+            stages,
+            norm,
+            head: Some(head),
+            loaded: true,
+        })
+    }
+
+    pub fn decode(&self, latents: &Tensor) -> Result<Tensor> {
+        if !self.loaded {
+            return Err(VibeVoiceTokenizerError::Unsupported(
+                "tokenizer decoder weights are not loaded",
+            ));
+        }
+        let mut xs = if latents.dims3()?.2 == 1 || latents.dims3()?.2 == 64 || latents.dims3()?.2 == 128 {
+            latents.transpose(1, 2)?
+        } else {
+            latents.clone()
+        };
+        for i in 0..self.stages.len() {
+            xs = self.upsample_layers[i].forward(&xs)?;
+            for block in &self.stages[i] {
+                xs = block.forward(&xs)?;
+            }
+        }
+        if let Some(norm) = &self.norm {
+            xs = norm.forward(&xs)?;
+        }
+        self.head
+            .as_ref()
+            .ok_or(VibeVoiceTokenizerError::Unsupported(
+                "tokenizer decoder head is not loaded",
+            ))?
+            .forward(&xs)
     }
 }
 
@@ -214,9 +652,22 @@ pub struct VibeVoiceAcousticTokenizerModel {
 
 impl VibeVoiceAcousticTokenizerModel {
     pub fn load(cfg: &VibeVoiceAcousticTokenizerConfig, vb: VarBuilder) -> Result<Self> {
+        let decoder = if vb.contains_tensor("decoder.upsample_layers.0.0.conv.conv.weight")
+            || vb.contains_tensor("decoder.head.conv.conv.weight")
+        {
+            TokenizerDecoder::load(cfg, vb.pp("decoder"))?
+        } else {
+            TokenizerDecoder {
+                upsample_layers: Vec::new(),
+                stages: Vec::new(),
+                norm: None,
+                head: None,
+                loaded: false,
+            }
+        };
         Ok(Self {
             encoder: TokenizerEncoder::load_acoustic(cfg, vb.pp("encoder"))?,
-            decoder: TokenizerDecoder,
+            decoder,
             std_dist_type: cfg.std_dist_type.clone(),
         })
     }
@@ -259,6 +710,42 @@ impl VibeVoiceSemanticTokenizerModel {
     }
 }
 
+fn parse_depths(depths: &str) -> Vec<usize> {
+    depths
+        .split('-')
+        .filter_map(|v| v.parse::<usize>().ok())
+        .collect()
+}
+
+fn pad_tensor1d(xs: &Tensor, left: usize, right: usize, value: f32) -> Result<Tensor> {
+    let (b, c, t) = xs.dims3()?;
+    let dtype = xs.dtype();
+    let data = xs
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let mut out = vec![value; b * c * (t + left + right)];
+    let new_t = t + left + right;
+    for bi in 0..b {
+        for ci in 0..c {
+            let src_offset = (bi * c + ci) * t;
+            let dst_offset = (bi * c + ci) * new_t + left;
+            out[dst_offset..dst_offset + t].copy_from_slice(&data[src_offset..src_offset + t]);
+        }
+    }
+    Ok(Tensor::from_vec(out, (b, c, new_t), xs.device())?.to_dtype(dtype)?)
+}
+
+fn trim_tensor1d(xs: &Tensor, left: usize, right: usize) -> Result<Tensor> {
+    let (_, _, t) = xs.dims3()?;
+    if left + right >= t {
+        return Err(VibeVoiceTokenizerError::InvalidShape(
+            "invalid trim exceeding tensor length".to_string(),
+        ));
+    }
+    Ok(xs.narrow(2, left, t - left - right)?)
+}
+
 #[allow(dead_code)]
 fn _shape3(shape: &Shape) -> Option<(usize, usize, usize)> {
     let dims = shape.dims();
@@ -298,8 +785,20 @@ mod tests {
         .unwrap();
         let input = Tensor::zeros((1, 1, 3200), DType::F32, &Device::Cpu).unwrap();
         let output = encoder.forward(&input).unwrap();
-        let (b, c, _t) = output.mean.dims3().unwrap();
+        let (b, t, c) = output.mean.dims3().unwrap();
         assert_eq!((b, c), (1, 64));
+        assert!(t > 0);
+    }
+
+    #[test]
+    fn decoder_forward_has_expected_channels() {
+        let vm = VarMap::new();
+        let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
+        let decoder =
+            TokenizerDecoder::load(&VibeVoiceAcousticTokenizerConfig::default(), vb).unwrap();
+        let input = Tensor::zeros((1, 1, 64), DType::F32, &Device::Cpu).unwrap();
+        let output = decoder.decode(&input).unwrap();
+        assert_eq!(output.dims3().unwrap().1, 1);
     }
 
     #[test]
@@ -321,7 +820,13 @@ mod tests {
         let vb = VarBuilder::from_varmap(&vm, DType::F32, &Device::Cpu);
         let norm = RmsNorm::new(2, 1e-6, vb).unwrap();
         let input = Tensor::from_vec(vec![3f32, 4.0], (1, 2), &Device::Cpu).unwrap();
-        let output = norm.forward(&input).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let output = norm
+            .forward(&input)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
         assert!((output[0] - 0.848528).abs() < 1e-4);
         assert!((output[1] - 1.131370).abs() < 1e-4);
     }

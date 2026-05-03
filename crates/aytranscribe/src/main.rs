@@ -1,20 +1,15 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::Result;
 use clap::Parser;
-use vibevoice_asr::VibeVoiceAsrProcessor;
+use vibevoice_asr::{DEFAULT_MODEL_REPO, VibeVoiceAsrModel, VibeVoiceAsrProcessor};
 use vibevoice_core::DeviceSpec;
 
 #[derive(Debug, Parser)]
 struct Cli {
-    #[arg(long)]
-    model_dir: PathBuf,
-
-    #[arg(long)]
-    tokenizer: PathBuf,
-
-    #[arg(long)]
     audio: PathBuf,
+
+    output: PathBuf,
 
     #[arg(long, default_value_t = 128)]
     max_new_tokens: usize,
@@ -24,6 +19,15 @@ struct Cli {
 
     #[arg(long, default_value = "cpu")]
     device: String,
+
+    #[arg(long)]
+    model_dir: Option<PathBuf>,
+
+    #[arg(long)]
+    tokenizer: Option<PathBuf>,
+
+    #[arg(long, default_value = DEFAULT_MODEL_REPO)]
+    model_repo: String,
 }
 
 fn main() -> Result<()> {
@@ -33,13 +37,22 @@ fn main() -> Result<()> {
 
 fn run(cli: Cli) -> Result<()> {
     let device = parse_device(&cli.device)?.resolve()?;
-    let processor = VibeVoiceAsrProcessor::from_file(&cli.tokenizer)?;
+    let (processor, mut model) = match (&cli.model_dir, &cli.tokenizer) {
+        (Some(model_dir), Some(tokenizer)) => {
+            let processor = VibeVoiceAsrProcessor::from_file(tokenizer)?;
+            let model = VibeVoiceAsrModel::from_local_dir(model_dir, tokenizer, device.clone())?;
+            (processor, model)
+        }
+        _ => {
+            let model = VibeVoiceAsrModel::from_hf_hub(Some(&cli.model_repo), device.clone())?;
+            let processor = model.processor_from_tokenizer()?;
+            (processor, model)
+        }
+    };
     let inputs = processor.prepare_audio_file(&cli.audio, &device, cli.context.as_deref())?;
-    let mut model =
-        vibevoice_asr::VibeVoiceAsrModel::from_local_dir(&cli.model_dir, &cli.tokenizer, device)?;
 
     let output = model.transcribe_inputs(&inputs, cli.max_new_tokens)?;
-    println!("{output}");
+    fs::write(&cli.output, &output)?;
     Ok(())
 }
 
@@ -62,12 +75,8 @@ mod tests {
     fn cli_parses_required_args() {
         let cli = Cli::try_parse_from([
             "aytranscribe",
-            "--model-dir",
-            "model",
-            "--tokenizer",
-            "tok.json",
-            "--audio",
             "sample.wav",
+            "out.txt",
         ])
         .unwrap();
         assert_eq!(cli.max_new_tokens, 128);
