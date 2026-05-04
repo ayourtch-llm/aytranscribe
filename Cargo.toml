@@ -26,4 +26,5 @@ safetensors = "0.4"
 symphonia = { version = "0.5", features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 thiserror = "2"
 tokenizers = "0.20"
+regex = "1"
 rubato = "0.16"

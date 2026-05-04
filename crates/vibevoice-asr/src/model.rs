@@ -233,11 +233,11 @@ impl VibeVoiceAsrModel {
         let mut next_token = logits_argmax(&first_logits)?;
         let mut offset = inputs.prompt_token_ids.len();
 
-        let mut in_string = false;
-        let mut in_slash = false;
-
-        let mut accum: String = format!("");
+        let mut accum: String = String::new();
         let mut acc_start = 1; // skip the leading '['
+        let mut last_good_end = 0usize; // end of last successfully parsed segment
+
+        let partial_end_re = regex::Regex::new(r#"\{"Start":\s*[\d.]+\s*,\s*"End":\s*([\d.]+)"#).unwrap();
 
         'outer: while generated.len() < max_new_tokens {
             if Some(next_token) == self.eos_token_id {
@@ -253,14 +253,21 @@ impl VibeVoiceAsrModel {
                 for c in piece.chars() {
                     accum.push(c);
                     if c != ',' {
-                      if let Ok(ts) = serde_json::from_str::<TranscriptionSegment>(&accum[acc_start..]) {
-                        eprintln!("\nPARSED: {:?}\n", ts);
-                        if ts.end > 900.0 {
-                            accum.push(']');
-                            break 'outer;
+                        if let Ok(ts) = serde_json::from_str::<TranscriptionSegment>(&accum[acc_start..]) {
+                            eprintln!("\nPARSED: {:?}\n", ts);
+                            if ts.end > 900.0 {
+                                break 'outer;
+                            }
+                            last_good_end = accum.len();
+                            acc_start = accum.len() + 1; // skip the upcoming comma
+                        } else if let Some(caps) = partial_end_re.captures(&accum[acc_start..]) {
+                            if let Ok(end_val) = caps[1].parse::<f64>() {
+                                if end_val > 900.0 {
+                                    eprintln!("\nPARTIAL END detected: {}\n", end_val);
+                                    break 'outer;
+                                }
+                            }
                         }
-                        acc_start = accum.len()+1; // skip the upcoming comma
-                      }
                     }
                 }
             }
@@ -287,7 +294,14 @@ impl VibeVoiceAsrModel {
             progress.on_generation_progress(generated.len(), estimated_total);
         }
 
-        let mut text = accum;
+        let text = if last_good_end > 0 {
+            format!("{}]", &accum[..last_good_end])
+        } else if let Some(pos) = accum.rfind(']') {
+            accum.truncate(pos + 1);
+            accum
+        } else {
+            "[]".to_string()
+        };
         Ok(text)
     }
 
