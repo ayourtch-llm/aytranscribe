@@ -259,6 +259,9 @@ impl VibeVoiceAsrModel {
                         }
                     }
                     accum.push(c);
+                    if accum.len() - acc_start > 4096 {
+                        panic!("RUNAWAY segment detected ({} bytes unparsed), truncating. Unparsed: {:?}", accum.len() - acc_start, &accum[acc_start..]);
+                    }
                     if c != ',' {
                         if let Ok(ts) = serde_json::from_str::<TranscriptionSegment>(&accum[acc_start..]) {
                             eprintln!("\nPARSED: {:?}\n", ts);
