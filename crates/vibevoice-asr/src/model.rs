@@ -233,11 +233,37 @@ impl VibeVoiceAsrModel {
         let mut next_token = logits_argmax(&first_logits)?;
         let mut offset = inputs.prompt_token_ids.len();
 
-        while generated.len() < max_new_tokens {
+        let mut in_string = false;
+        let mut in_slash = false;
+
+        let mut accum: String = format!("");
+        let mut acc_start = 1; // skip the leading '['
+
+        'outer: while generated.len() < max_new_tokens {
             if Some(next_token) == self.eos_token_id {
                 break;
             }
             generated.push(next_token);
+            {
+                use crate::TranscriptionSegment;
+                let piece = self
+                    .decoder_tokenizer
+                    .decode(&[next_token], true)
+                    .map_err(VibeVoiceAsrError::Tokenizer)?;
+                for c in piece.chars() {
+                    accum.push(c);
+                    if c != ',' {
+                      if let Ok(ts) = serde_json::from_str::<TranscriptionSegment>(&accum[acc_start..]) {
+                        eprintln!("\nPARSED: {:?}\n", ts);
+                        if ts.end > 900.0 {
+                            accum.push(']');
+                            break 'outer;
+                        }
+                        acc_start = accum.len()+1; // skip the upcoming comma
+                      }
+                    }
+                }
+            }
             if let Some(progress) = progress {
                 let piece = self
                     .decoder_tokenizer
@@ -261,13 +287,7 @@ impl VibeVoiceAsrModel {
             progress.on_generation_progress(generated.len(), estimated_total);
         }
 
-        let mut text = self
-            .decoder_tokenizer
-            .decode(&generated, true)
-            .map_err(VibeVoiceAsrError::Tokenizer)?;
-        if let Some(pos) = text.rfind(']') {
-            text.truncate(pos + 1);
-        }
+        let mut text = accum;
         Ok(text)
     }
 
