@@ -51,7 +51,7 @@ pub struct TranscriptionSegment {
     pub start: f64,
     #[serde(rename = "End")]
     pub end: f64,
-    #[serde(rename = "Speaker")]
+    #[serde(rename = "Speaker", default)]
     pub speaker: i64,
     #[serde(rename = "Content")]
     pub content: String,
