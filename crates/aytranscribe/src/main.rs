@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File},
     io::{Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Mutex,
     time::Instant,
 };
@@ -11,7 +11,7 @@ use clap::Parser;
 use vibevoice_asr::{
     ChunkedTranscriptionOptions, DEFAULT_CHUNK_OVERLAP_SECS, DEFAULT_MAX_CHUNK_DURATION_SECS,
     DEFAULT_MODEL_REPO, TranscriptionProgress, TranscriptionSegment, VibeVoiceAsrModel,
-    VibeVoiceAsrProcessor,
+    VibeVoiceAsrProcessor, chunk_backup_path,
 };
 use vibevoice_core::{DeviceSpec, TARGET_SAMPLE_RATE, load_audio_file};
 
@@ -80,6 +80,7 @@ fn run(cli: Cli) -> Result<()> {
         overlap_secs: DEFAULT_CHUNK_OVERLAP_SECS,
         max_new_tokens: cli.max_new_tokens,
         context_info: cli.context.as_deref(),
+        output_path: Some(&cli.output),
     };
     let segments =
         model.transcribe_audio_buffer(&processor, &audio, &device, &options, Some(&progress))?;
@@ -240,19 +241,6 @@ impl JsonStreamWriter {
         }
         Ok(())
     }
-}
-
-fn chunk_backup_path(output_path: &PathBuf, chunk_index: usize) -> PathBuf {
-    let stem = output_path
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "output".to_string());
-    let ext = output_path
-        .extension()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "json".to_string());
-    let parent = output_path.parent().unwrap_or(Path::new("."));
-    parent.join(format!("{stem}.chunk_{chunk_index:03}.{ext}"))
 }
 
 fn format_clock(seconds: f64) -> String {

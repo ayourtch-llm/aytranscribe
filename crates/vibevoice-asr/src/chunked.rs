@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use candle_core::{Device, Tensor};
 use serde::{Deserialize, Serialize};
 use vibevoice_core::{AudioBuffer, TARGET_SAMPLE_RATE, load_audio_file};
@@ -24,6 +26,7 @@ pub struct ChunkedTranscriptionOptions<'a> {
     pub overlap_secs: f64,
     pub max_new_tokens: usize,
     pub context_info: Option<&'a str>,
+    pub output_path: Option<&'a Path>,
 }
 
 impl<'a> Default for ChunkedTranscriptionOptions<'a> {
@@ -33,6 +36,7 @@ impl<'a> Default for ChunkedTranscriptionOptions<'a> {
             overlap_secs: DEFAULT_CHUNK_OVERLAP_SECS,
             max_new_tokens: 128,
             context_info: None,
+            output_path: None,
         }
     }
 }
@@ -114,6 +118,22 @@ impl VibeVoiceAsrModel {
             if let Some(progress) = progress {
                 progress.on_chunk_start(chunk.chunk_index, chunk.total_chunks, start_time_secs);
             }
+
+            if let Some(output_path) = options.output_path {
+                let cache_path = chunk_backup_path(output_path, chunk.chunk_index);
+                if let Ok(cached) = std::fs::read_to_string(&cache_path) {
+                    if let Ok(cached_segments) = serde_json::from_str::<Vec<TranscriptionSegment>>(&cached) {
+                        eprintln!("(loaded {} segments from cache: {})", cached_segments.len(), cache_path.display());
+                        let appended = merge_transcription_segments(&mut merged, cached_segments);
+                        if let Some(progress) = progress {
+                            let partial_json = serde_json::to_string(&appended)?;
+                            progress.on_chunk_complete(chunk.chunk_index, &partial_json);
+                        }
+                        continue;
+                    }
+                }
+            }
+
             let chunk_samples = &audio.samples[chunk.start_sample..chunk.end_sample];
             let speech_tensor =
                 Tensor::from_vec(chunk_samples.to_vec(), (1, 1, chunk_samples.len()), device)?;
@@ -230,6 +250,19 @@ pub fn merge_transcription_segments(
         appended.push(segment);
     }
     appended
+}
+
+pub fn chunk_backup_path(output_path: &Path, chunk_index: usize) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "output".to_string());
+    let ext = output_path
+        .extension()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "json".to_string());
+    let parent = output_path.parent().unwrap_or(Path::new("."));
+    parent.join(format!("{stem}.chunk_{chunk_index:03}.{ext}"))
 }
 
 fn is_duplicate_or_overlapping(

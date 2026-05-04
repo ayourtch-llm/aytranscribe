@@ -251,6 +251,13 @@ impl VibeVoiceAsrModel {
                     .decode(&[next_token], true)
                     .map_err(VibeVoiceAsrError::Tokenizer)?;
                 for c in piece.chars() {
+                    if accum.is_empty() {
+                        match c {
+                            '[' => { accum.push('['); continue; }
+                            '{' => { accum.push_str("[{"); continue; }
+                            _ => continue,
+                        }
+                    }
                     accum.push(c);
                     if c != ',' {
                         if let Ok(ts) = serde_json::from_str::<TranscriptionSegment>(&accum[acc_start..]) {
