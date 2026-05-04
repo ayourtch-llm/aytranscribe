@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "aytranscribe"
+path = "src/main.rs"
+
+[[bin]]
+name = "ayjson2txt"
+path = "src/json2txt.rs"
+
 [features]
 cuda = ["vibevoice-asr/cuda", "vibevoice-core/cuda"]
 metal = ["vibevoice-asr/metal", "vibevoice-core/metal"]
